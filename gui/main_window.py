@@ -1,0 +1,240 @@
+"""
+主窗口
+"""
+from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout,
+                             QTabWidget, QStatusBar, QMessageBox,
+                             QFileDialog, QSplitter)
+from PyQt5.QtCore import Qt
+import pyvista as pv
+
+from gui.interactive_view import InteractiveView
+from gui.view_axes_2d import ViewAxes2D
+import numpy as np
+
+
+class MainWindow(QMainWindow):
+    """主窗口"""
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("道路地下三维建模与网格划分软件")
+        self.setGeometry(100, 100, 1600, 900)
+        
+        # 初始化模型（暂时为空，后续添加）
+        self.model = None
+        
+        # 创建UI
+        self._create_menu_bar()
+        self._create_status_bar()
+        self._create_main_widget()
+        
+        # 更新状态栏
+        self.statusBar().showMessage('就绪')
+        
+    def _create_menu_bar(self):
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        
+        # 文件菜单
+        file_menu = menubar.addMenu('文件(&F)')
+        file_menu.addAction('新建项目(&N)', self.new_project, 'Ctrl+N')
+        file_menu.addAction('打开项目(&O)', self.open_project, 'Ctrl+O')
+        file_menu.addAction('保存项目(&S)', self.save_project, 'Ctrl+S')
+        file_menu.addSeparator()
+        file_menu.addAction('退出(&X)', self.close, 'Ctrl+Q')
+        
+        # 编辑菜单
+        edit_menu = menubar.addMenu('编辑(&E)')
+        edit_menu.addAction('撤销(&U)', self.undo, 'Ctrl+Z')
+        edit_menu.addAction('重做(&R)', self.redo, 'Ctrl+Y')
+        edit_menu.addSeparator()
+        edit_menu.addAction('清除模型(&C)', self.clear_model)
+        
+        # 视图菜单
+        view_menu = menubar.addMenu('视图(&V)')
+        view_menu.addAction('重置视图(&R)', self.reset_view)
+        view_menu.addAction('显示坐标轴(&A)', self.toggle_axes)
+        view_menu.addAction('显示网格(&G)', self.toggle_grid)
+        
+        # 帮助菜单
+        help_menu = menubar.addMenu('帮助(&H)')
+        help_menu.addAction('关于(&A)', self.show_about)
+        
+    def _create_main_widget(self):
+        """创建主界面"""
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 创建分割器
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # 左侧：功能面板（暂时为空，后续添加）
+        self.tabs = QTabWidget()
+        self.tabs.setMaximumWidth(400)
+        
+        # 右侧：交互式3D视图
+        pv.set_plot_theme("default")  # 使用默认主题（浅色）
+        # 使用自定义的交互式视图组件（实现轨道摄像机控制）
+        plotter_container = QWidget()
+        plotter_layout = QHBoxLayout(plotter_container)
+        plotter_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.plotter = InteractiveView(
+            plotter_container,
+            workspace_bounds=np.array([-100.0, 100.0, -100.0, 100.0, -50.0, 0.0]),
+            background_color='white'
+        )
+        plotter_layout.addWidget(self.plotter)
+        
+        # 添加2D坐标轴控件（固定在右上角）
+        self.view_axes = ViewAxes2D(self.plotter, size=100)
+        self.view_axes.setParent(self.plotter)
+        self.view_axes.raise_()  # 确保在最上层
+        
+        # 连接相机变化信号到坐标轴更新
+        def update_view_axes():
+            if hasattr(self, 'view_axes') and hasattr(self, 'plotter'):
+                try:
+                    camera = self.plotter.renderer.GetActiveCamera()
+                    position = np.array(camera.GetPosition())
+                    focal_point = np.array(camera.GetFocalPoint())
+                    view_up = np.array(camera.GetViewUp())
+                    
+                    direction = position - focal_point
+                    direction_norm = np.linalg.norm(direction)
+                    if direction_norm > 1e-6:
+                        direction = direction / direction_norm
+                        self.view_axes.update_camera_direction(direction, view_up)
+                except Exception as e:
+                    pass  # 忽略更新错误
+        
+        self.plotter.view_changed.connect(update_view_axes)
+        
+        # 添加到分割器
+        splitter.addWidget(self.tabs)
+        splitter.addWidget(plotter_container)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        
+        main_layout.addWidget(splitter)
+        
+        # 初始更新一次坐标轴位置和方向
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(100, lambda: [update_view_axes(), self._update_view_axes_position()])
+        
+    def _create_status_bar(self):
+        """创建状态栏"""
+        self.statusBar().showMessage('就绪')
+        
+    def reset_view(self):
+        """重置视图"""
+        self.plotter.reset_camera()
+        
+    def toggle_axes(self):
+        """切换坐标轴显示"""
+        if hasattr(self, 'view_axes'):
+            self.view_axes.setVisible(not self.view_axes.isVisible())
+            status = '显示' if self.view_axes.isVisible() else '隐藏'
+            self.statusBar().showMessage(f'坐标轴已{status}', 2000)
+        else:
+            self.statusBar().showMessage('坐标轴未初始化', 2000)
+    
+    def _update_view_axes_position(self):
+        """更新坐标轴位置到右上角"""
+        if hasattr(self, 'view_axes') and hasattr(self, 'plotter'):
+            plotter_size = self.plotter.size()
+            axes_size = self.view_axes.size().width()
+            margin = 10
+            self.view_axes.move(
+                plotter_size.width() - axes_size - margin,
+                margin
+            )
+            self.view_axes.show()
+    
+    def resizeEvent(self, event):
+        """窗口大小改变事件"""
+        super().resizeEvent(event)
+        self._update_view_axes_position()
+        
+    def toggle_grid(self):
+        """切换网格显示"""
+        # TODO: 实现网格切换功能
+        self.statusBar().showMessage('网格切换功能待实现', 2000)
+        
+    def new_project(self):
+        """新建项目"""
+        reply = QMessageBox.question(
+            self, '新建项目',
+            '是否保存当前项目？',
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+        )
+        
+        if reply == QMessageBox.Cancel:
+            return
+        elif reply == QMessageBox.Yes:
+            self.save_project()
+        
+        # 创建新模型
+        self.model = None
+        self.plotter.clear()
+        self.statusBar().showMessage('已创建新项目', 2000)
+        
+    def open_project(self):
+        """打开项目"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, '打开项目', '', 'JSON Files (*.json);;All Files (*)'
+        )
+        if filename:
+            # TODO: 实现项目加载
+            QMessageBox.information(self, '提示', '项目加载功能待实现')
+            
+    def save_project(self):
+        """保存项目"""
+        filename, _ = QFileDialog.getSaveFileName(
+            self, '保存项目', '', 'JSON Files (*.json);;All Files (*)'
+        )
+        if filename:
+            # TODO: 实现项目保存
+            QMessageBox.information(self, '提示', '项目保存功能待实现')
+            
+    def undo(self):
+        """撤销"""
+        # TODO: 实现撤销功能
+        self.statusBar().showMessage('撤销功能待实现', 2000)
+        
+    def redo(self):
+        """重做"""
+        # TODO: 实现重做功能
+        self.statusBar().showMessage('重做功能待实现', 2000)
+        
+    def clear_model(self):
+        """清除模型"""
+        reply = QMessageBox.question(
+            self, '清除模型',
+            '确定要清除所有模型数据吗？此操作不可撤销。',
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.model = None
+            self.plotter.clear()
+            self.statusBar().showMessage('模型已清除', 2000)
+            
+    def show_about(self):
+        """显示关于对话框"""
+        QMessageBox.about(
+            self, '关于',
+            '道路地下三维建模与网格划分软件\n\n'
+            '版本: 0.1.0\n\n'
+            '功能：\n'
+            '- 交互式三维建模视图\n'
+            '- 轨道摄像机控制\n'
+            '- 预设模型建模（球体、椭球体、立方体等）\n'
+            '- 自由建模（点、线、面）\n'
+            '- 网格生成\n'
+            '- 可视化\n'
+            '- 数据导出'
+        )
