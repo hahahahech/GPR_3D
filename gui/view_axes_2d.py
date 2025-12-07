@@ -1,5 +1,5 @@
 """
-2D坐标轴控件 - 固定在屏幕右上角，显示当前视角方向
+方向组件 - 固定在屏幕右上角，显示当前视角方向
 """
 from PyQt5.QtWidgets import QWidget
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint
@@ -9,11 +9,11 @@ from typing import Optional
 
 
 class ViewAxes2D(QWidget):
-    """2D坐标轴控件 - 显示当前视角方向的坐标轴"""
+    """方向组件 - 显示当前视角方向的坐标轴"""
     
     def __init__(self, parent=None, size=100):
         """
-        初始化2D坐标轴控件
+        初始化方向组件
         
         Parameters:
         -----------

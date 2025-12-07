@@ -20,9 +20,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("道路地下三维建模与网格划分软件")
         self.setGeometry(100, 100, 1600, 900)
         
-        # 初始化模型（暂时为空，后续添加）
-        self.model = None
-        
         # 创建UI
         self._create_menu_bar()
         self._create_status_bar()
@@ -30,6 +27,10 @@ class MainWindow(QMainWindow):
         
         # 更新状态栏
         self.statusBar().showMessage('就绪')
+        
+        # 连接InteractiveView的状态消息信号
+        if hasattr(self, 'plotter') and hasattr(self.plotter, 'status_message'):
+            self.plotter.status_message.connect(self.statusBar().showMessage)
         
     def _create_menu_bar(self):
         """创建菜单栏"""
@@ -53,8 +54,11 @@ class MainWindow(QMainWindow):
         # 视图菜单
         view_menu = menubar.addMenu('视图(&V)')
         view_menu.addAction('重置视图(&R)', self.reset_view)
-        view_menu.addAction('显示坐标轴(&A)', self.toggle_axes)
+        view_menu.addAction('显示方向组件(&A)', self.toggle_axes)
         view_menu.addAction('显示网格(&G)', self.toggle_grid)
+        view_menu.addAction('显示原点坐标轴(&O)', self.toggle_origin_axes)
+        view_menu.addSeparator()
+        view_menu.addAction('设置区域大小(&W)', self.set_workspace_size)
         
         # 帮助菜单
         help_menu = menubar.addMenu('帮助(&H)')
@@ -71,11 +75,7 @@ class MainWindow(QMainWindow):
         # 创建分割器
         splitter = QSplitter(Qt.Horizontal)
         
-        # 左侧：功能面板（暂时为空，后续添加）
-        self.tabs = QTabWidget()
-        self.tabs.setMaximumWidth(400)
-        
-        # 右侧：交互式3D视图
+        # 右侧：交互式3D视图（先创建plotter，因为modeling_panel需要它）
         pv.set_plot_theme("default")  # 使用默认主题（浅色）
         # 使用自定义的交互式视图组件（实现轨道摄像机控制）
         plotter_container = QWidget()
@@ -89,12 +89,16 @@ class MainWindow(QMainWindow):
         )
         plotter_layout.addWidget(self.plotter)
         
-        # 添加2D坐标轴控件（固定在右上角）
+        # 左侧：功能面板
+        self.tabs = QTabWidget()
+        self.tabs.setMaximumWidth(400)
+        
+        # 添加方向组件（固定在右上角）
         self.view_axes = ViewAxes2D(self.plotter, size=100)
         self.view_axes.setParent(self.plotter)
         self.view_axes.raise_()  # 确保在最上层
         
-        # 连接相机变化信号到坐标轴更新
+        # 连接相机变化信号到方向组件更新
         def update_view_axes():
             if hasattr(self, 'view_axes') and hasattr(self, 'plotter'):
                 try:
@@ -121,7 +125,7 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(splitter)
         
-        # 初始更新一次坐标轴位置和方向
+        # 初始更新一次方向组件位置和方向
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(100, lambda: [update_view_axes(), self._update_view_axes_position()])
         
@@ -134,16 +138,25 @@ class MainWindow(QMainWindow):
         self.plotter.reset_camera()
         
     def toggle_axes(self):
-        """切换坐标轴显示"""
+        """切换方向组件显示"""
         if hasattr(self, 'view_axes'):
             self.view_axes.setVisible(not self.view_axes.isVisible())
             status = '显示' if self.view_axes.isVisible() else '隐藏'
-            self.statusBar().showMessage(f'坐标轴已{status}', 2000)
+            self.statusBar().showMessage(f'方向组件已{status}', 2000)
         else:
-            self.statusBar().showMessage('坐标轴未初始化', 2000)
+            self.statusBar().showMessage('方向组件未初始化', 2000)
+    
+    def toggle_origin_axes(self):
+        """切换原点坐标轴显示"""
+        if hasattr(self, 'plotter'):
+            self.plotter.toggle_origin_axes()
+            status = '显示' if self.plotter.get_show_origin_axes() else '隐藏'
+            self.statusBar().showMessage(f'原点坐标轴已{status}', 2000)
+        else:
+            self.statusBar().showMessage('视图未初始化', 2000)
     
     def _update_view_axes_position(self):
-        """更新坐标轴位置到右上角"""
+        """更新方向组件位置到右上角"""
         if hasattr(self, 'view_axes') and hasattr(self, 'plotter'):
             plotter_size = self.plotter.size()
             axes_size = self.view_axes.size().width()
@@ -161,8 +174,12 @@ class MainWindow(QMainWindow):
         
     def toggle_grid(self):
         """切换网格显示"""
-        # TODO: 实现网格切换功能
-        self.statusBar().showMessage('网格切换功能待实现', 2000)
+        if hasattr(self, 'plotter'):
+            self.plotter.toggle_grid()
+            status = '显示' if self.plotter.get_show_grid() else '隐藏'
+            self.statusBar().showMessage(f'网格已{status}', 2000)
+        else:
+            self.statusBar().showMessage('视图未初始化', 2000)
         
     def new_project(self):
         """新建项目"""
@@ -177,8 +194,7 @@ class MainWindow(QMainWindow):
         elif reply == QMessageBox.Yes:
             self.save_project()
         
-        # 创建新模型
-        self.model = None
+        # 创建新项目
         self.plotter.clear()
         self.statusBar().showMessage('已创建新项目', 2000)
         
@@ -219,9 +235,91 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
-            self.model = None
             self.plotter.clear()
             self.statusBar().showMessage('模型已清除', 2000)
+            
+    def set_workspace_size(self):
+        """设置工作空间大小"""
+        from PyQt5.QtWidgets import QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox
+        
+        # 获取当前边界
+        current_bounds = self.plotter.get_workspace_bounds()
+        
+        # 创建对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle('设置区域大小')
+        dialog.setModal(True)
+        
+        layout = QFormLayout(dialog)
+        
+        # X范围
+        x_min_spin = QDoubleSpinBox()
+        x_min_spin.setRange(-10000, 10000)
+        x_min_spin.setValue(current_bounds[0])
+        x_min_spin.setDecimals(2)
+        layout.addRow("X 最小值:", x_min_spin)
+        
+        x_max_spin = QDoubleSpinBox()
+        x_max_spin.setRange(-10000, 10000)
+        x_max_spin.setValue(current_bounds[1])
+        x_max_spin.setDecimals(2)
+        layout.addRow("X 最大值:", x_max_spin)
+        
+        # Y范围
+        y_min_spin = QDoubleSpinBox()
+        y_min_spin.setRange(-10000, 10000)
+        y_min_spin.setValue(current_bounds[2])
+        y_min_spin.setDecimals(2)
+        layout.addRow("Y 最小值:", y_min_spin)
+        
+        y_max_spin = QDoubleSpinBox()
+        y_max_spin.setRange(-10000, 10000)
+        y_max_spin.setValue(current_bounds[3])
+        y_max_spin.setDecimals(2)
+        layout.addRow("Y 最大值:", y_max_spin)
+        
+        # Z范围
+        z_min_spin = QDoubleSpinBox()
+        z_min_spin.setRange(-10000, 10000)
+        z_min_spin.setValue(current_bounds[4])
+        z_min_spin.setDecimals(2)
+        layout.addRow("Z 最小值:", z_min_spin)
+        
+        z_max_spin = QDoubleSpinBox()
+        z_max_spin.setRange(-10000, 10000)
+        z_max_spin.setValue(current_bounds[5])
+        z_max_spin.setDecimals(2)
+        layout.addRow("Z 最大值:", z_max_spin)
+        
+        # 按钮
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        
+        # 显示对话框
+        if dialog.exec_() == QDialog.Accepted:
+            # 验证输入
+            if (x_min_spin.value() >= x_max_spin.value() or 
+                y_min_spin.value() >= y_max_spin.value() or 
+                z_min_spin.value() >= z_max_spin.value()):
+                QMessageBox.warning(self, '错误', '最小值必须小于最大值')
+                return
+            
+            # 设置新的边界
+            new_bounds = np.array([
+                x_min_spin.value(),
+                x_max_spin.value(),
+                y_min_spin.value(),
+                y_max_spin.value(),
+                z_min_spin.value(),
+                z_max_spin.value()
+            ])
+            
+            self.plotter.set_workspace_bounds(new_bounds)
+            self.statusBar().showMessage(f'区域大小已更新: X[{new_bounds[0]:.2f}, {new_bounds[1]:.2f}], '
+                                       f'Y[{new_bounds[2]:.2f}, {new_bounds[3]:.2f}], '
+                                       f'Z[{new_bounds[4]:.2f}, {new_bounds[5]:.2f}]', 3000)
             
     def show_about(self):
         """显示关于对话框"""
@@ -230,10 +328,8 @@ class MainWindow(QMainWindow):
             '道路地下三维建模与网格划分软件\n\n'
             '版本: 0.1.0\n\n'
             '功能：\n'
-            '- 交互式三维建模视图\n'
+            '- 交互式三维视图\n'
             '- 轨道摄像机控制\n'
-            '- 预设模型建模（球体、椭球体、立方体等）\n'
-            '- 自由建模（点、线、面）\n'
             '- 网格生成\n'
             '- 可视化\n'
             '- 数据导出'
