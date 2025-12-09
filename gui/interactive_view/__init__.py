@@ -2,6 +2,7 @@
 交互式建模视图模块
 """
 from .view import InteractiveView
+from .edit_mode import EditModeManager
 from .workspace import (
     create_workspace_bounds_mesh,
     calculate_workspace_center,
@@ -13,6 +14,7 @@ from .workspace import (
 
 __all__ = [
     'InteractiveView',
+    'EditModeManager',
     'create_workspace_bounds_mesh',
     'calculate_workspace_center',
     'calculate_initial_camera_distance',

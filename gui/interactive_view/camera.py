@@ -303,3 +303,60 @@ class CameraController:
         view.render()
         view.view_changed.emit()
 
+    @staticmethod
+    def focus_on_point(view, target_point: np.ndarray, zoom_factor: float = 0.5):
+        """
+        将视角聚焦到指定点
+        
+        Parameters:
+        -----------
+        view : InteractiveView
+            交互式视图实例
+        target_point : np.ndarray
+            目标点坐标 [x, y, z]
+        zoom_factor : float
+            缩放因子，默认0.5（越小越近）
+        """
+        camera = view.renderer.GetActiveCamera()
+        
+        # 获取当前摄像机参数
+        current_position = np.array(camera.GetPosition())
+        current_focal = np.array(camera.GetFocalPoint())
+        current_view_up = np.array(camera.GetViewUp())
+        
+        # 计算当前方向
+        current_direction = current_position - current_focal
+        current_distance = np.linalg.norm(current_direction)
+        
+        if current_distance < 1e-6:
+            return  # 避免除零错误
+        
+        current_direction_normalized = current_direction / current_distance
+        
+        # 依据当前距离缩放，防止“移动不明显”
+        bounds = view.workspace_bounds
+        workspace_size = max(
+            bounds[1] - bounds[0],
+            bounds[3] - bounds[2],
+            bounds[5] - bounds[4]
+        )
+        base_distance = current_distance * zoom_factor
+        min_distance = max(workspace_size * 0.02, 1.0)
+        max_distance = workspace_size * 2.0
+        new_distance = np.clip(base_distance, min_distance, max_distance)
+        
+        # 计算新的摄像机位置（保持当前方向）
+        new_position = target_point + current_direction_normalized * new_distance
+        
+        # 更新摄像机
+        camera.SetPosition(new_position)
+        camera.SetFocalPoint(target_point)
+        camera.SetViewUp(current_view_up)
+        
+        # 更新轨道中心
+        view._orbit_center = target_point.copy()
+        view._camera_distance = new_distance
+        
+        view.render()
+        view.view_changed.emit()
+

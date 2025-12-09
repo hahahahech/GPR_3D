@@ -1,14 +1,15 @@
 """
 交互式建模视图核心类
 """
-from PyQt5.QtWidgets import QLabel
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint
-from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import QLabel, QToolButton, QMenu, QWidgetAction, QWidget, QVBoxLayout
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QSize
+from PyQt5.QtGui import QFont, QIcon, QPixmap
+import os
 from pyvistaqt import QtInteractor
 import pyvista as pv
 import numpy as np
 from typing import Optional
-
+from .mode_toolbar import ModeToolbar
 from .workspace import (
     create_workspace_bounds_mesh,
     calculate_workspace_center,
@@ -20,6 +21,7 @@ from .workspace import (
 from .camera import CameraController
 from .coordinates import CoordinateConverter
 from .events import EventHandler
+from .edit_mode import EditModeManager, PointOperator, LineOperator, PlaneOperator, ColorSelector
 
 
 class InteractiveView(QtInteractor):
@@ -28,6 +30,8 @@ class InteractiveView(QtInteractor):
     # 信号定义
     view_changed = pyqtSignal()  # 视图改变时发出信号
     status_message = pyqtSignal(str)  # 状态消息信号
+    mode_changed = pyqtSignal(str)  # 模式改变时发出信号，参数是模式名称
+    tool_changed = pyqtSignal(str)  # 工具改变时发出信号，参数是工具名称
     
     def __init__(self, parent=None, 
                  workspace_bounds: Optional[np.ndarray] = None,
@@ -70,6 +74,17 @@ class InteractiveView(QtInteractor):
         self._origin_axes_actor = None  # 原点坐标轴actor
         self._grid_spacing = 10.0  # 网格间距
         
+        # 模式选择
+        self._current_mode = 'object'  # 当前模式：'object'（物体模式）或 'edit'（编辑模式）
+        
+        # 编辑工具选择
+        self._current_tool = None  # 当前工具：'point', 'line', 'curve', 'plane' 或 None
+        self._tool_buttons = {}  # 存储工具按钮引用
+        
+        # 物体模式操作工具选择
+        self._current_object_tool = None  # 当前物体操作工具：'select', 'box_select', 'translate', 'scale', 'rotate' 或 None
+        self._object_tool_buttons = {}  # 存储物体操作工具按钮引用
+        
         # 鼠标交互状态
         self._last_mouse_pos = None
         self._is_rotating = False
@@ -85,6 +100,28 @@ class InteractiveView(QtInteractor):
         # 初始化网格和坐标轴（默认不显示）
         self._update_grid()
         self._update_origin_axes()
+        # 创建模式切换和工具选择工具栏
+        self._mode_toolbar = ModeToolbar(self)
+
+        # 保留这些状态变量（用于向后兼容）
+        self._current_mode = self._mode_toolbar.get_current_mode()
+        self._current_tool = None
+        self._current_object_tool = None
+        
+        # 创建编辑模式管理器
+        self._edit_mode_manager = EditModeManager()
+        
+        # 创建点操作器
+        self._point_operator = PointOperator(self._edit_mode_manager)
+        # 创建线操作器
+        self._line_operator = LineOperator(self._edit_mode_manager)
+        # 创建面操作器
+        self._plane_operator = PlaneOperator(self._edit_mode_manager)
+        # 创建颜色选择器
+        self._color_selector = ColorSelector(self._edit_mode_manager)
+
+        # 初始化边界几何（不可操作，仅可选）
+        self._init_boundary_geometry()
         
         # 创建左下角坐标显示标签
         self._coord_label = QLabel(self)
@@ -167,6 +204,66 @@ class InteractiveView(QtInteractor):
         
         self.render()
         self.view_changed.emit()
+
+    def _init_boundary_geometry(self):
+        """初始化边界点/线/面为锁定对象（仅可选不可操作）"""
+        bounds = self.workspace_bounds
+        x_min, x_max = bounds[0], bounds[1]
+        y_min, y_max = bounds[2], bounds[3]
+        z_min, z_max = bounds[4], bounds[5]
+
+        # 8 个顶点
+        corners = np.array([
+            [x_min, y_min, z_min],
+            [x_max, y_min, z_min],
+            [x_max, y_max, z_min],
+            [x_min, y_max, z_min],
+            [x_min, y_min, z_max],
+            [x_max, y_min, z_max],
+            [x_max, y_max, z_max],
+            [x_min, y_max, z_max],
+        ])
+        for i, pos in enumerate(corners):
+            # 边界点只作为数据存在，不渲染
+            self._edit_mode_manager.add_point(f"boundary_point_{i}", pos, view=None, locked=True)
+
+        # 12 条边
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),  # 底面
+            (4, 5), (5, 6), (6, 7), (7, 4),  # 顶面
+            (0, 4), (1, 5), (2, 6), (3, 7)   # 垂直边
+        ]
+        for idx, (a, b) in enumerate(edges):
+            # 边界线只作为数据存在，不渲染
+            self._edit_mode_manager.add_line(
+                f"boundary_line_{idx}",
+                corners[a],
+                corners[b],
+                view=None,
+                locked=True
+            )
+
+        # 6 个面（保持透明，可选不可编辑）
+        faces = [
+            [0, 1, 2, 3],  # bottom z_min
+            [4, 5, 6, 7],  # top z_max
+            [0, 1, 5, 4],  # front y_min
+            [1, 2, 6, 5],  # right x_max
+            [2, 3, 7, 6],  # back y_max
+            [3, 0, 4, 7],  # left x_min
+        ]
+        for idx, verts_idx in enumerate(faces):
+            verts = corners[verts_idx]
+            plane_id = f"boundary_plane_{idx}"
+            # 浅灰色透明（只作为数据存在，不渲染）
+            color = (0.9, 0.9, 0.9)
+            self._edit_mode_manager.add_plane(
+                plane_id,
+                verts,
+                view=None,
+                color=color,
+                locked=True
+            )
     
     def get_workspace_bounds(self) -> np.ndarray:
         """
@@ -194,6 +291,14 @@ class InteractiveView(QtInteractor):
             opacity=0.3,
             name='workspace_bounds'
         )
+        # 边界框仅用于视觉参考，禁止拾取，避免阻挡编辑点选/拖拽
+        try:
+            actor.PickableOff()
+        except Exception:
+            try:
+                actor.SetPickable(False)
+            except Exception:
+                pass
         # 存储actor引用以便后续移除
         if not hasattr(self, '_workspace_bounds_actor'):
             self._workspace_bounds_actor = []
@@ -328,6 +433,14 @@ class InteractiveView(QtInteractor):
                 opacity=0.5,
                 name='grid'
             )
+            # 网格只作参考，禁用拾取
+            try:
+                self._grid_actor.PickableOff()
+            except Exception:
+                try:
+                    self._grid_actor.SetPickable(False)
+                except Exception:
+                    pass
     
     def set_show_origin_axes(self, show: bool):
         """
@@ -404,6 +517,13 @@ class InteractiveView(QtInteractor):
                 line_width=2.0,
                 name='origin_axis_x'
             )
+            try:
+                x_actor.PickableOff()
+            except Exception:
+                try:
+                    x_actor.SetPickable(False)
+                except Exception:
+                    pass
             
             # 添加Y轴（绿色）
             y_actor = self.add_mesh(
@@ -412,10 +532,16 @@ class InteractiveView(QtInteractor):
                 line_width=2.0,
                 name='origin_axis_y'
             )
+            try:
+                y_actor.PickableOff()
+            except Exception:
+                try:
+                    y_actor.SetPickable(False)
+                except Exception:
+                    pass
             
             # 存储两个actor（使用列表）
             self._origin_axes_actor = [x_actor, y_actor]
-    
     # ========== 坐标显示 ==========
     
     def _update_coord_label_position(self):
@@ -439,7 +565,7 @@ class InteractiveView(QtInteractor):
         world_pos = CoordinateConverter.screen_to_world_raycast(self, screen_pos)
         if world_pos is not None:
             self._coord_label.setText(
-                f"X: {world_pos[0]:.2f}, Y: {world_pos[1]:.2f}, Z: {world_pos[2]:.2f}"
+                f"X: {world_pos[0]:.1f}, Y: {world_pos[1]:.1f}, Z: {world_pos[2]:.1f}"
             )
             self._coord_label.show()
         else:
@@ -478,10 +604,36 @@ class InteractiveView(QtInteractor):
     def keyPressEvent(self, event):
         """键盘事件处理"""
         EventHandler.key_press_event(self, event)
+
+    def get_current_mode(self) -> str:
+        """获取当前模式"""
+        return self._mode_toolbar.get_current_mode()
+    
+    def set_mode(self, mode: str):
+        """设置模式"""
+        self._mode_toolbar.set_mode(mode)
+    
+    def get_current_tool(self) -> Optional[str]:
+        """获取当前选择的工具"""
+        return self._mode_toolbar.get_current_tool()
+    
+    def set_tool(self, tool_id: Optional[str]):
+        """设置工具"""
+        self._mode_toolbar.set_tool(tool_id)
+    
+    def get_current_object_tool(self) -> Optional[str]:
+        """获取当前选择的物体操作工具"""
+        return self._mode_toolbar.get_current_object_tool()
+    
+    def set_object_tool(self, tool_id: Optional[str]):
+        """设置物体操作工具"""
+        self._mode_toolbar.set_object_tool(tool_id)
     
     def resizeEvent(self, event):
         """窗口大小改变事件"""
         super().resizeEvent(event)
         if hasattr(self, '_coord_label'):
             self._update_coord_label_position()
+        if hasattr(self, '_mode_toolbar'):
+            self._mode_toolbar.update_positions()
 

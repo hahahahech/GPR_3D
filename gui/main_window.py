@@ -2,9 +2,10 @@
 主窗口
 """
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout,
-                             QTabWidget, QStatusBar, QMessageBox,
-                             QFileDialog, QSplitter)
+                             QStatusBar, QMessageBox,
+                             QFileDialog, QDockWidget, QPlainTextEdit)
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
 import pyvista as pv
 
 from gui.interactive_view import InteractiveView
@@ -24,6 +25,7 @@ class MainWindow(QMainWindow):
         self._create_menu_bar()
         self._create_status_bar()
         self._create_main_widget()
+        self._create_log_dock()
         
         # 更新状态栏
         self.statusBar().showMessage('就绪')
@@ -31,6 +33,9 @@ class MainWindow(QMainWindow):
         # 连接InteractiveView的状态消息信号
         if hasattr(self, 'plotter') and hasattr(self.plotter, 'status_message'):
             self.plotter.status_message.connect(self.statusBar().showMessage)
+            # 同时连接到日志窗口
+            if hasattr(self, '_log_widget'):
+                self.plotter.status_message.connect(self._append_log_message)
         
     def _create_menu_bar(self):
         """创建菜单栏"""
@@ -58,6 +63,8 @@ class MainWindow(QMainWindow):
         view_menu.addAction('显示网格(&G)', self.toggle_grid)
         view_menu.addAction('显示原点坐标轴(&O)', self.toggle_origin_axes)
         view_menu.addSeparator()
+        view_menu.addAction('显示日志窗口(&L)', self.toggle_log_dock)
+        view_menu.addSeparator()
         view_menu.addAction('设置区域大小(&W)', self.set_workspace_size)
         
         # 帮助菜单
@@ -66,32 +73,15 @@ class MainWindow(QMainWindow):
         
     def _create_main_widget(self):
         """创建主界面"""
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # 创建分割器
-        splitter = QSplitter(Qt.Horizontal)
-        
-        # 右侧：交互式3D视图（先创建plotter，因为modeling_panel需要它）
+        # 直接使用InteractiveView作为中央部件，占据整个窗口
         pv.set_plot_theme("default")  # 使用默认主题（浅色）
-        # 使用自定义的交互式视图组件（实现轨道摄像机控制）
-        plotter_container = QWidget()
-        plotter_layout = QHBoxLayout(plotter_container)
-        plotter_layout.setContentsMargins(0, 0, 0, 0)
         
         self.plotter = InteractiveView(
-            plotter_container,
+            self,
             workspace_bounds=np.array([-100.0, 100.0, -100.0, 100.0, -50.0, 0.0]),
             background_color='white'
         )
-        plotter_layout.addWidget(self.plotter)
-        
-        # 左侧：功能面板
-        self.tabs = QTabWidget()
-        self.tabs.setMaximumWidth(400)
+        self.setCentralWidget(self.plotter)
         
         # 添加方向组件（固定在右上角）
         self.view_axes = ViewAxes2D(self.plotter, size=100)
@@ -117,14 +107,6 @@ class MainWindow(QMainWindow):
         
         self.plotter.view_changed.connect(update_view_axes)
         
-        # 添加到分割器
-        splitter.addWidget(self.tabs)
-        splitter.addWidget(plotter_container)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        
-        main_layout.addWidget(splitter)
-        
         # 初始更新一次方向组件位置和方向
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(100, lambda: [update_view_axes(), self._update_view_axes_position()])
@@ -132,6 +114,55 @@ class MainWindow(QMainWindow):
     def _create_status_bar(self):
         """创建状态栏"""
         self.statusBar().showMessage('就绪')
+    
+    def _create_log_dock(self):
+        """创建日志停靠窗口"""
+        # 创建停靠窗口
+        self._log_dock = QDockWidget("操作日志", self)
+        self._log_dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
+        self._log_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | 
+            QDockWidget.DockWidgetClosable | 
+            QDockWidget.DockWidgetFloatable
+        )
+        
+        # 创建日志文本框
+        self._log_widget = QPlainTextEdit()
+        self._log_widget.setReadOnly(True)
+        self._log_widget.setMaximumBlockCount(500)  # 最多保留500行
+        self._log_widget.setFont(QFont('Consolas', 9))
+        self._log_widget.setStyleSheet(
+            "QPlainTextEdit {"
+            "   background-color: #2b2b2b;"
+            "   color: #e0e0e0;"
+            "   border: none;"
+            "   padding: 4px;"
+            "}"
+        )
+        self._log_widget.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        
+        # 设置为停靠窗口的内容
+        self._log_dock.setWidget(self._log_widget)
+        
+        # 添加到主窗口底部
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._log_dock)
+        
+        # 设置初始高度
+        self._log_dock.setMinimumHeight(100)
+        self._log_dock.setMaximumHeight(300)
+        
+        # 初始日志
+        self._append_log_message("系统已启动，准备就绪")
+    
+    def _append_log_message(self, msg: str):
+        """追加日志消息"""
+        if hasattr(self, '_log_widget'):
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self._log_widget.appendPlainText(f"[{timestamp}] {msg}")
+            # 自动滚动到底部
+            scrollbar = self._log_widget.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
         
     def reset_view(self):
         """重置视图"""
@@ -154,6 +185,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f'原点坐标轴已{status}', 2000)
         else:
             self.statusBar().showMessage('视图未初始化', 2000)
+    
+    def toggle_log_dock(self):
+        """切换日志窗口显示"""
+        if hasattr(self, '_log_dock'):
+            self._log_dock.setVisible(not self._log_dock.isVisible())
+            status = '显示' if self._log_dock.isVisible() else '隐藏'
+            self.statusBar().showMessage(f'日志窗口已{status}', 2000)
+        else:
+            self.statusBar().showMessage('日志窗口未初始化', 2000)
     
     def _update_view_axes_position(self):
         """更新方向组件位置到右上角"""
