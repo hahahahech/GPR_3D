@@ -243,7 +243,7 @@ class Curve(Line):
     """曲线类 - 使用B样条生成光滑曲线，继承自Line"""
     
     def __init__(self, id: str, control_points: List[Point], 
-                 degree: int = 3, num_points: int = 100,
+                 degree: int = 3, num_points: int = 20,
                  name: Optional[str] = None, color: Optional[tuple] = None):
         """
         初始化B样条曲线
@@ -368,13 +368,14 @@ class Surface:
     surface_type: str = 'polygon'  # 'polygon', 'mesh', 'nurbs', 'plane'
     name: Optional[str] = None
     color: Optional[tuple] = None  # (r,g,b) 0-1
+    normal: Optional[np.ndarray] = None  # 法向量 (3,)，自动计算
     
     def __post_init__(self):
         """验证数据并四舍五入到1位小数"""
         if not isinstance(self.vertices, np.ndarray):
             self.vertices = np.array(self.vertices, dtype=np.float32)
         if len(self.vertices.shape) != 2 or self.vertices.shape[1] != 3:
-            raise ValueError("Vertices must be Nx3 array")
+            raise ValueError("顶点必须是Nx3数组")
         # 四舍五入到1位小数
         self.vertices = round_to_1_decimal(self.vertices)
         
@@ -386,6 +387,75 @@ class Surface:
             self.color = (0.0, 1.0, 0.0)
         else:
             self.color = tuple(float(max(0.0, min(1.0, c))) for c in self.color)
+        
+        # 自动计算法向量
+        if self.normal is None:
+            self.normal = self._calculate_normal()
+    
+    def _calculate_normal(self) -> np.ndarray:
+        """
+        计算面的法向量（使用前三个顶点）
+        使用Newell方法计算法向量，适用于任意多边形
+        
+        Returns:
+        --------
+        np.ndarray
+            单位法向量 (3,)
+        """
+        if len(self.vertices) < 3:
+            # 顶点不足，返回默认法向量
+            return np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        
+        # 使用Newell方法计算法向量（更稳定，适用于非平面多边形）
+        normal = np.zeros(3, dtype=np.float64)
+        n = len(self.vertices)
+        
+        for i in range(n):
+            v1 = self.vertices[i]
+            v2 = self.vertices[(i + 1) % n]
+            
+            normal[0] += (v1[1] - v2[1]) * (v1[2] + v2[2])
+            normal[1] += (v1[2] - v2[2]) * (v1[0] + v2[0])
+            normal[2] += (v1[0] - v2[0]) * (v1[1] + v2[1])
+        
+        # 归一化
+        length = np.linalg.norm(normal)
+        if length < 1e-10:
+            # 如果法向量长度太小，使用叉积方法
+            v1 = self.vertices[1] - self.vertices[0]
+            v2 = self.vertices[2] - self.vertices[0]
+            normal = np.cross(v1, v2)
+            length = np.linalg.norm(normal)
+            
+            if length < 1e-10:
+                # 仍然失败，返回默认法向量
+                return np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        
+        normal = normal / length
+        return normal.astype(np.float32)
+    
+    def get_normal(self) -> np.ndarray:
+        """
+        获取面的法向量
+        
+        Returns:
+        --------
+        np.ndarray
+            单位法向量 (3,)
+        """
+        if self.normal is None:
+            self.normal = self._calculate_normal()
+        return self.normal.copy()
+    
+    def flip_normal(self):
+        """
+        翻转法向量（同时反转顶点顺序）
+        """
+        self.vertices = np.flip(self.vertices, axis=0)
+        if self.normal is not None:
+            self.normal = -self.normal
+        else:
+            self.normal = -self._calculate_normal()
     
     @classmethod
     def from_lines(cls, id: str, lines: List[Line], 
@@ -484,7 +554,8 @@ class Surface:
             'vertices': self.vertices.tolist(),
             'surface_type': self.surface_type,
             'name': self.name,
-            'color': list(self.color) if self.color is not None else None
+            'color': list(self.color) if self.color is not None else None,
+            'normal': self.normal.tolist() if self.normal is not None else None
         }
         if self.faces is not None:
             result['faces'] = self.faces.tolist()
@@ -498,5 +569,6 @@ class Surface:
             faces=self.faces.copy() if self.faces is not None else None,
             surface_type=self.surface_type,
             name=self.name,
-            color=self.color
+            color=self.color,
+            normal=self.normal.copy() if self.normal is not None else None
         )

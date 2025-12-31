@@ -6,8 +6,6 @@
 from typing import Optional, List
 import numpy as np
 from PyQt5.QtCore import QPoint
-
-from ..coordinates import CoordinateConverter
 from model.geometry import Surface
 
 
@@ -26,33 +24,46 @@ class PlaneOperator:
         self._selected_line_ids = []
         self._selected_point_ids = []
 
-    def handle_click(self, screen_pos: QPoint, view) -> Optional[str]:
+    def add_selection(self, screen_pos: QPoint, view) -> bool:
         """
-        处理一次屏幕点击：
-        1) 在屏幕空间选中已有线段或点（不创建新元素）
-        2) 收集对象，尝试构建闭合多边形，成功则生成面
-        Returns: 创建的面ID（若生成），否则 None
+        左键点击：选中点或线并添加到选中列表
+        Returns: 是否成功添加
         """
         selected = self.edit_manager.select_at_screen_position(
             screen_pos, view, pixel_threshold=10
         )
         if selected is None:
-            return None
+            return False
 
         sel_type = selected.get('type')
         if sel_type == 'line':
             line_id = selected['id']
             if line_id in self._selected_line_ids:
-                return None
+                if hasattr(view, 'status_message'):
+                    view.status_message.emit(f'线 {line_id} 已选中')
+                return False
             self._selected_line_ids.append(line_id)
+            if hasattr(view, 'status_message'):
+                view.status_message.emit(f'已选中线: {line_id} (总计 {len(self._selected_line_ids)} 条线)')
+            return True
         elif sel_type == 'point':
             point_id = selected['id']
             if point_id in self._selected_point_ids:
-                return None
+                if hasattr(view, 'status_message'):
+                    view.status_message.emit(f'点 {point_id} 已选中')
+                return False
             self._selected_point_ids.append(point_id)
+            if hasattr(view, 'status_message'):
+                view.status_message.emit(f'已选中点: {point_id} (总计 {len(self._selected_point_ids)} 个点)')
+            return True
         else:
-            return None
-
+            return False
+    
+    def finalize_plane(self, view) -> Optional[str]:
+        """
+        右键点击：根据已选中的点/线生成面
+        Returns: 创建的面ID（若成功），否则 None
+        """
         # 先尝试线段闭合
         if len(self._selected_line_ids) >= 3:
             vertices = self._build_polygon_vertices(self._selected_line_ids)
@@ -64,6 +75,10 @@ class PlaneOperator:
                         view.status_message.emit(f'已生成面(线): {plane_id}')
                     self.reset()
                     return plane_id
+                else:
+                    if hasattr(view, 'status_message'):
+                        view.status_message.emit('生成面失败')
+                    return None
 
         # 再尝试点集生成
         if len(self._selected_point_ids) >= 3:
@@ -76,7 +91,14 @@ class PlaneOperator:
                         view.status_message.emit(f'已生成面(点): {plane_id}')
                     self.reset()
                     return plane_id
-
+                else:
+                    if hasattr(view, 'status_message'):
+                        view.status_message.emit('生成面失败')
+                    return None
+        
+        # 选中的点/线不足
+        if hasattr(view, 'status_message'):
+            view.status_message.emit(f'需要至少3条线户63个点才能生成面 (当前: {len(self._selected_line_ids)}线, {len(self._selected_point_ids)}点)')
         return None
 
     # ========== 帮助方法 ==========
@@ -94,6 +116,16 @@ class PlaneOperator:
             if lid not in self.edit_manager._lines:
                 return None
             start, end = self.edit_manager._lines[lid]
+            # resolve if stored as point ids
+            try:
+                if isinstance(start, str):
+                    start = self.edit_manager._points[start].position
+                if isinstance(end, str):
+                    end = self.edit_manager._points[end].position
+            except Exception:
+                # fallback: assume arrays
+                start = np.array(start, dtype=np.float64)
+                end = np.array(end, dtype=np.float64)
             lines.append((start, end))
 
         # 初始化顶点序列

@@ -31,6 +31,9 @@ class CameraController:
         # 设置投影模式
         camera.SetParallelProjection(view._is_orthographic)
         
+        # 设置近裁剪距离，避免视角前移时边缘被裁剪
+        camera.SetClippingRange(0.001, 1000.0)
+        
         view.render()
     
     @staticmethod
@@ -231,21 +234,7 @@ class CameraController:
     
     @staticmethod
     def set_view(view, view_name: str):
-        """
-        设置快速视角
-        
-        Parameters:
-        -----------
-        view_name : str
-            视角名称，可选值：
-            - 'front': 前视图（+Y方向）
-            - 'back': 后视图（-Y方向）
-            - 'top': 俯视图（+Z方向，北向）
-            - 'bottom': 底视图（-Z方向）
-            - 'left': 左视图（-X方向）
-            - 'right': 右视图（+X方向）
-            - 'iso': 等轴测视图（默认）
-        """
+        """设置快速视角"""
         camera = view.renderer.GetActiveCamera()
         center = view._orbit_center
         distance = view._camera_distance
@@ -307,15 +296,6 @@ class CameraController:
     def focus_on_point(view, target_point: np.ndarray, zoom_factor: float = 0.5):
         """
         将视角聚焦到指定点
-        
-        Parameters:
-        -----------
-        view : InteractiveView
-            交互式视图实例
-        target_point : np.ndarray
-            目标点坐标 [x, y, z]
-        zoom_factor : float
-            缩放因子，默认0.5（越小越近）
         """
         camera = view.renderer.GetActiveCamera()
         
@@ -359,4 +339,60 @@ class CameraController:
         
         view.render()
         view.view_changed.emit()
+    
+    @staticmethod
+    def focus_on_plane(view, surface, distance_factor: float = 1.5):
+        """将视角聚焦到面，摄像机沿着法线方向放置"""
+        # 从面对象获取顶点和法向量
+        plane_vertices = surface.vertices
+        plane_normal = surface.normal
+        
+        # 计算面的中心点
+        center = np.mean(plane_vertices, axis=0)
+        
+        # 第一步：使用 focus_on_point 聚焦到中心点（保持当前方向）
+        CameraController.focus_on_point(view, center, zoom_factor=0.8)
+        
+        # 第二步：调整摄像机方向到法向量方向
+        camera = view.renderer.GetActiveCamera()
+        
+        # 计算面的包围盒对角线长度
+        bbox_min = np.min(plane_vertices, axis=0)
+        bbox_max = np.max(plane_vertices, axis=0)
+        diag = np.linalg.norm(bbox_max - bbox_min)
+        
+        # 计算目标距离
+        target_distance = max(diag * distance_factor, 5.0)
+        
+        # 使用面提供的法向量（应该是单位向量）
+        # 确保法向量是单位向量
+        normal_length = np.linalg.norm(plane_normal)
+        if normal_length < 1e-10:
+            # 法向量无效，使用默认方向
+            plane_normal = np.array([0.0, 0.0, 1.0])
+        else:
+            plane_normal = plane_normal / normal_length
+        
+        # 计算新的摄像机位置：沿着法线方向放置
+        camera_position = center + plane_normal * target_distance
+        
+        # 设置视角上向量：尽量保持Z轴向上
+        # 如果法向量接近垂直，使用Y轴作为上向量
+        if abs(plane_normal[2]) > 0.9:  # 法向量接近垂直
+            view_up = np.array([0.0, 1.0, 0.0])
+        else:
+            view_up = np.array([0.0, 0.0, 1.0])
+        
+        # 更新摄像机（调整方向到法向量方向）
+        camera.SetPosition(camera_position)
+        camera.SetFocalPoint(center)
+        camera.SetViewUp(view_up)
+        
+        # 更新轨道中心和距离
+        view._orbit_center = center.copy()
+        view._camera_distance = target_distance
+        
+        view.render()
+        view.view_changed.emit()
+    
 

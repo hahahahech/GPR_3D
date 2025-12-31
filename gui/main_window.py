@@ -10,6 +10,7 @@ import pyvista as pv
 
 from gui.interactive_view import InteractiveView
 from gui.view_axes_2d import ViewAxes2D
+from gui.interactive_view.SceneInspector import SceneInspector
 import numpy as np
 
 
@@ -82,6 +83,36 @@ class MainWindow(QMainWindow):
             background_color='white'
         )
         self.setCentralWidget(self.plotter)
+        
+        # 将编辑工具放到停靠窗口（位于菜单栏下方）
+        try:
+            tools_dock = QDockWidget("编辑工具", self)
+            tools_dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.LeftDockWidgetArea)
+            tools_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+            # 使用 ModeToolbar 生成的工具栏 widget 作为停靠内容
+            if hasattr(self.plotter, '_mode_toolbar') and getattr(self.plotter._mode_toolbar, '_toolbar_widget', None) is not None:
+                # 如果已有父级，重新设置父级为停靠窗口
+                toolbar_widget = self.plotter._mode_toolbar._toolbar_widget
+                tools_dock.setWidget(toolbar_widget)
+                # 将停靠窗口添加到主窗口顶部
+                self.addDockWidget(Qt.TopDockWidgetArea, tools_dock)
+                # 保存引用
+                self._tools_dock = tools_dock
+        except Exception as e:
+            # 如果停靠创建失败，打印调试信息但不阻塞主界面
+            print(f"创建编辑工具停靠窗口失败: {e}")
+        
+        # 右侧场景面板（显示点/线/面）
+        try:
+            inspector_dock = QDockWidget("场景集合", self)
+            inspector_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+            inspector_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+            inspector = SceneInspector(self.plotter, parent=self)
+            inspector_dock.setWidget(inspector)
+            self.addDockWidget(Qt.RightDockWidgetArea, inspector_dock)
+            self._inspector_dock = inspector_dock
+        except Exception as e:
+            print(f"创建场景面板失败: {e}")
         
         # 添加方向组件（固定在右上角）
         self.view_axes = ViewAxes2D(self.plotter, size=100)
@@ -258,13 +289,25 @@ class MainWindow(QMainWindow):
             
     def undo(self):
         """撤销"""
-        # TODO: 实现撤销功能
-        self.statusBar().showMessage('撤销功能待实现', 2000)
+        try:
+            if hasattr(self, 'plotter') and self.plotter is not None:
+                if self.plotter._edit_mode_manager.undo(self.plotter):
+                    self.statusBar().showMessage('已撤销', 2000)
+                    return
+        except Exception:
+            pass
+        self.statusBar().showMessage('无可撤销操作', 2000)
         
     def redo(self):
         """重做"""
-        # TODO: 实现重做功能
-        self.statusBar().showMessage('重做功能待实现', 2000)
+        try:
+            if hasattr(self, 'plotter') and self.plotter is not None:
+                if self.plotter._edit_mode_manager.redo(self.plotter):
+                    self.statusBar().showMessage('已重做', 2000)
+                    return
+        except Exception:
+            pass
+        self.statusBar().showMessage('无可重做操作', 2000)
         
     def clear_model(self):
         """清除模型"""

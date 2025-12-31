@@ -22,6 +22,7 @@ from .camera import CameraController
 from .coordinates import CoordinateConverter
 from .events import EventHandler
 from .edit_mode import EditModeManager, PointOperator, LineOperator, PlaneOperator, ColorSelector
+from .edit_mode import StretchOperator
 
 
 class InteractiveView(QtInteractor):
@@ -117,8 +118,13 @@ class InteractiveView(QtInteractor):
         self._line_operator = LineOperator(self._edit_mode_manager)
         # 创建面操作器
         self._plane_operator = PlaneOperator(self._edit_mode_manager)
+        # 创建拉伸操作器（占位）
+        self._stretch_operator = StretchOperator(self._edit_mode_manager)
         # 创建颜色选择器
         self._color_selector = ColorSelector(self._edit_mode_manager)
+
+        # 被屏幕拾取的点高亮状态缓存 (用于视觉反馈)
+        self._picked_point_prev = None  # (point_id, color)
 
         # 初始化边界几何（不可操作，仅可选）
         self._init_boundary_geometry()
@@ -136,6 +142,9 @@ class InteractiveView(QtInteractor):
         self._coord_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._coord_label.hide()  # 初始隐藏，鼠标移动时显示
         self._update_coord_label_position()
+        
+        # 存储当前鼠标位置的世界坐标（用于点创建）
+        self._current_world_pos = None
     
     # ========== 工作空间相关方法 ==========
     
@@ -234,23 +243,24 @@ class InteractiveView(QtInteractor):
             (0, 4), (1, 5), (2, 6), (3, 7)   # 垂直边
         ]
         for idx, (a, b) in enumerate(edges):
-            # 边界线只作为数据存在，不渲染
+            # 边界线只作为数据存在，不渲染，使用 point id 引用
             self._edit_mode_manager.add_line(
                 f"boundary_line_{idx}",
-                corners[a],
-                corners[b],
+                f"boundary_point_{a}",
+                f"boundary_point_{b}",
                 view=None,
                 locked=True
             )
 
         # 6 个面（保持透明，可选不可编辑）
+        # 顶点顺序按右手坐标系设置，确保法向量指向空间外部
         faces = [
-            [0, 1, 2, 3],  # bottom z_min
-            [4, 5, 6, 7],  # top z_max
-            [0, 1, 5, 4],  # front y_min
-            [1, 2, 6, 5],  # right x_max
-            [2, 3, 7, 6],  # back y_max
-            [3, 0, 4, 7],  # left x_min
+            [0, 3, 2, 1],  # bottom z_min, 法向量指向-Z（向下）
+            [4, 5, 6, 7],  # top z_max, 法向量指向+Z（向上）
+            [0, 1, 5, 4],  # front y_min, 法向量指向-Y（向前）
+            [1, 2, 6, 5],  # right x_max, 法向量指向+X（向右）
+            [2, 3, 7, 6],  # back y_max, 法向量指向+Y（向后）
+            [3, 0, 4, 7],  # left x_min, 法向量指向-X（向左）
         ]
         for idx, verts_idx in enumerate(faces):
             verts = corners[verts_idx]
@@ -286,9 +296,9 @@ class InteractiveView(QtInteractor):
         # 添加到场景（使用淡灰色，半透明）
         actor = self.add_mesh(
             lines_mesh,
-            color='lightgray',
+            color='black',
             line_width=1.0,
-            opacity=0.3,
+            opacity=1.0,
             name='workspace_bounds'
         )
         # 边界框仅用于视觉参考，禁止拾取，避免阻挡编辑点选/拖拽
@@ -339,21 +349,7 @@ class InteractiveView(QtInteractor):
     # ========== 快速视角切换 ==========
     
     def set_view(self, view_name: str):
-        """
-        设置快速视角
-        
-        Parameters:
-        -----------
-        view_name : str
-            视角名称，可选值：
-            - 'front': 前视图（+Y方向）
-            - 'back': 后视图（-Y方向）
-            - 'top': 俯视图（+Z方向，北向）
-            - 'bottom': 底视图（-Z方向）
-            - 'left': 左视图（-X方向）
-            - 'right': 右视图（+X方向）
-            - 'iso': 等轴测视图（默认）
-        """
+        """设置快速视角"""
         CameraController.set_view(self, view_name)
     
     def reset_camera(self):
@@ -364,28 +360,14 @@ class InteractiveView(QtInteractor):
     # ========== 网格和坐标轴控制 ==========
     
     def set_show_grid(self, show: bool):
-        """
-        设置是否显示网格
-        
-        Parameters:
-        -----------
-        show : bool
-            True=显示网格，False=隐藏网格
-        """
+        """设置是否显示网格"""
         self._show_grid = show
         self._update_grid()
         self.render()
         self.view_changed.emit()
     
     def get_show_grid(self) -> bool:
-        """
-        获取网格显示状态
-        
-        Returns:
-        --------
-        bool
-            True=显示，False=隐藏
-        """
+        """获取网格显示状态"""
         return self._show_grid
     
     def toggle_grid(self):
@@ -393,14 +375,7 @@ class InteractiveView(QtInteractor):
         self.set_show_grid(not self._show_grid)
     
     def set_grid_spacing(self, spacing: float):
-        """
-        设置网格间距
-        
-        Parameters:
-        -----------
-        spacing : float
-            网格间距
-        """
+        """设置网格间距"""
         if spacing <= 0:
             raise ValueError("网格间距必须大于0")
         self._grid_spacing = spacing
@@ -415,14 +390,13 @@ class InteractiveView(QtInteractor):
     
     def _update_grid(self):
         """更新网格显示"""
-        # 移除旧的网格
+
         if self._grid_actor is not None:
             try:
                 self.remove_actor(self._grid_actor)
             except:
                 pass
             self._grid_actor = None
-        
         # 如果显示网格，创建新的网格
         if self._show_grid:
             grid_mesh = create_grid_mesh(self.workspace_bounds, self._grid_spacing, z=0.0)
@@ -443,28 +417,14 @@ class InteractiveView(QtInteractor):
                     pass
     
     def set_show_origin_axes(self, show: bool):
-        """
-        设置是否显示原点坐标轴
-        
-        Parameters:
-        -----------
-        show : bool
-            True=显示坐标轴，False=隐藏坐标轴
-        """
+        """设置是否显示原点坐标轴"""
         self._show_origin_axes = show
         self._update_origin_axes()
         self.render()
         self.view_changed.emit()
     
     def get_show_origin_axes(self) -> bool:
-        """
-        获取原点坐标轴显示状态
-        
-        Returns:
-        --------
-        bool
-            True=显示，False=隐藏
-        """
+        """获取原点坐标轴显示状态"""
         return self._show_origin_axes
     
     def toggle_origin_axes(self):
@@ -561,8 +521,22 @@ class InteractiveView(QtInteractor):
         """更新坐标显示"""
         if not hasattr(self, '_coord_label'):
             return
-        # 使用射线投射获取鼠标指向的世界坐标
-        world_pos = CoordinateConverter.screen_to_world_raycast(self, screen_pos)
+        
+        world_pos = None
+        
+        # 如果有激活平面，使用平面坐标转换
+        if hasattr(self, '_edit_mode_manager'):
+            try:
+                plane_verts = self._edit_mode_manager.get_active_plane_vertices()
+                if plane_verts is not None and len(plane_verts) >= 3:
+                    world_pos = CoordinateConverter.screen_to_world_on_plane(self, screen_pos, plane_verts)
+            except Exception:
+                pass
+        
+        # 如果没有激活平面或平面转换失败，使用射线投射
+        if world_pos is None:
+            world_pos = CoordinateConverter.screen_to_world_raycast(self, screen_pos)
+        
         if world_pos is not None:
             self._coord_label.setText(
                 f"X: {world_pos[0]:.1f}, Y: {world_pos[1]:.1f}, Z: {world_pos[2]:.1f}"
@@ -570,6 +544,102 @@ class InteractiveView(QtInteractor):
             self._coord_label.show()
         else:
             self._coord_label.setText("X: --, Y: --, Z: --")
+        
+        # 保存当前世界坐标到属性
+        self._current_world_pos = world_pos
+            
+        return world_pos
+
+    def undo(self):
+        """撤销上一步编辑操作"""
+        if hasattr(self, '_edit_mode_manager'):
+            ok = self._edit_mode_manager.undo(view=self)
+            if ok:
+                try:
+                    if hasattr(self, 'status_message'):
+                        self.status_message.emit('已撤销')
+                except Exception:
+                    pass
+                return True
+        try:
+            if hasattr(self, 'status_message'):
+                self.status_message.emit('无可撤销操作')
+        except Exception:
+            pass
+        return False
+
+    def redo(self):
+        """重做上一步被撤销的操作"""
+        if hasattr(self, '_edit_mode_manager'):
+            ok = self._edit_mode_manager.redo(view=self)
+            if ok:
+                try:
+                    if hasattr(self, 'status_message'):
+                        self.status_message.emit('已重做')
+                except Exception:
+                    pass
+                return True
+        try:
+            if hasattr(self, 'status_message'):
+                self.status_message.emit('无可重做操作')
+        except Exception:
+            pass
+        return False
+
+    def pick_point_at_screen(self, screen_pos: QPoint, pixel_threshold: int = 10) -> Optional[str]:
+        """
+        在屏幕坐标位置选择最近的点（仅返回点ID，不尝试选择线或面）。
+        这个函数作为公共方法，供 LineOperator / Curve 等调用以在屏幕上拾取点。
+        """
+        if not hasattr(self, '_edit_mode_manager'):
+            return None
+        renderer = self.renderer
+        width = self.width()
+        height = self.height()
+        vtk_x = screen_pos.x()
+        vtk_y = height - screen_pos.y() - 1
+
+        best_pid = None
+        best_dist = float('inf')
+        try:
+            for point_id, point_obj in self._edit_mode_manager._points.items():
+                try:
+                    pos = point_obj.position
+                except Exception:
+                    pos = np.array(point_obj, dtype=np.float64)
+                renderer.SetWorldPoint(pos[0], pos[1], pos[2], 1.0)
+                renderer.WorldToDisplay()
+                dsp = renderer.GetDisplayPoint()
+                dx = dsp[0] - vtk_x
+                dy = dsp[1] - vtk_y
+                dist = np.hypot(dx, dy)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_pid = point_id
+        except Exception:
+            return None
+
+        if best_pid is not None and best_dist <= pixel_threshold:
+            # 清除上一个高亮
+            try:
+                if hasattr(self, '_picked_point_prev') and self._picked_point_prev is not None:
+                    prev_id, prev_color = self._picked_point_prev
+                    try:
+                        self._edit_mode_manager.set_point_color(prev_id, prev_color, view=self)
+                    except Exception:
+                        pass
+                    self._picked_point_prev = None
+                # 获取原色并设置高亮黄色
+                try:
+                    orig_color = self._edit_mode_manager._point_colors.get(best_pid, (1.0, 0.0, 0.0))
+                    self._picked_point_prev = (best_pid, orig_color)
+                    self._edit_mode_manager.set_point_color(best_pid, (1.0, 1.0, 0.0), view=self)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return best_pid
+        return None
     
     # ========== 摄像机控制公共 API ==========
     
@@ -584,7 +654,7 @@ class InteractiveView(QtInteractor):
     # ========== Qt 事件处理方法 ==========
     # 这些方法必须保留，因为它们是 Qt 的事件处理接口
     # 内部直接调用 EventHandler 的静态方法
-    
+
     def mousePressEvent(self, event):
         """鼠标按下事件"""
         EventHandler.mouse_press_event(self, event)

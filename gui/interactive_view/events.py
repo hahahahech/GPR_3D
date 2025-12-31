@@ -21,23 +21,66 @@ class EventHandler:
         if hasattr(view, '_mode_toolbar'):
             current_mode = view._mode_toolbar.get_current_mode()
             current_tool = view._mode_toolbar.get_current_tool()
-            
+            select_enabled = False
+            try:
+                if hasattr(view._mode_toolbar, 'is_select_enabled'):
+                    select_enabled = view._mode_toolbar.is_select_enabled()
+            except Exception:
+                select_enabled = False
+
+            # 独立选择模式：开启后可与其它工具共存。
+            # 左键点击优先用于选择/拖拽（不按 Alt 时），否则才交给具体工具。
+            if current_mode == 'edit' and select_enabled and (current_tool is None or current_tool == 'edit_select'):
+                if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.AltModifier):
+                    # 获取编辑模式管理器
+                    if hasattr(view, '_edit_mode_manager'):
+                        view._edit_mode_manager.handle_selection_and_action(view, event.pos())
+                    return
             # 如果是编辑模式且选择了点工具
             if current_mode == 'edit' and current_tool == 'point':
                 if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.AltModifier):
                     EventHandler._try_create_point(view, event.pos())
                     return
 
-            # 编辑模式线工具：连续点击生成线段
-            if current_mode == 'edit' and current_tool == 'line':
-                if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.AltModifier):
-                    EventHandler._try_create_line(view, event.pos())
-                    return
+            
+           # 编辑模式折线工具：左键添加控制点，右键生成折线
+            if current_mode == 'edit' and current_tool == 'polyline':
+                # 左键用于添加控制点，右键用于结束并生成折线
+                if not (event.modifiers() & Qt.AltModifier):
+                    if event.button() == Qt.LeftButton:
+                        # add control point
+                        EventHandler._try_create_polyline(view, event, finalize=False)
+                        return
+                    elif event.button() == Qt.RightButton:
+                        EventHandler._try_create_polyline(view, event, finalize=True)
+                        return
+            # 编辑模式曲线工具：多点选取后右键结束生成曲线
+            if current_mode == 'edit' and current_tool == 'curve':
+                # 左键用于添加控制点，右键用于结束并生成曲线
+                if not (event.modifiers() & Qt.AltModifier):
+                    if event.button() == Qt.LeftButton:
+                        # add control point
+                        EventHandler._try_create_curve(view, event, finalize=False)
+                        return
+                    elif event.button() == Qt.RightButton:
+                        EventHandler._try_create_curve(view, event, finalize=True)
+                        return
 
-            # 编辑模式面工具：选线成面
+            # 编辑模式面工具：左键选中点/线，右键生成面
             if current_mode == 'edit' and current_tool == 'plane':
+                if not (event.modifiers() & Qt.AltModifier):
+                    if event.button() == Qt.LeftButton:
+                        # 选中点或线
+                        EventHandler._try_select_for_plane(view, event.pos())
+                        return
+                    elif event.button() == Qt.RightButton:
+                        # 生成面
+                        EventHandler._try_finalize_plane(view)
+                        return
+            # 编辑模式拉伸工具：点击选择点为拉伸目标（占位）
+            if current_mode == 'edit' and current_tool == 'lashen':
                 if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.AltModifier):
-                    EventHandler._try_create_plane(view, event.pos())
+                    EventHandler._try_create_stretch(view, event.pos())
                     return
 
             # 编辑模式颜色工具：选中对象修改颜色
@@ -46,21 +89,6 @@ class EventHandler:
                     EventHandler._try_color_select(view, event.pos())
                     return
             
-            # 如果是编辑模式且选择了选择工具，检查是否选中了点（用于拖拽）
-            if current_mode == 'edit' and current_tool == 'edit_select':
-                if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.AltModifier):
-                    selected = EventHandler._try_select_edit_object_for_drag(view, event.pos())
-                    if selected and selected.get('type') == 'point':
-                        # 锁定点不可拖拽
-                        if hasattr(view, '_edit_mode_manager') and selected['id'] in getattr(view._edit_mode_manager, '_locked_points', set()):
-                            return
-                        # 开始拖拽点
-                        if hasattr(view, '_point_operator'):
-                            view._point_operator.start_drag(selected['id'], event.pos(), view)
-                        return
-                    # 如果没有选中点，执行普通选择
-                    EventHandler._try_select_object(view, event.pos())
-                    return
         
         # 对象选择（其他情况）
         if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.AltModifier):
@@ -166,8 +194,19 @@ class EventHandler:
         if hasattr(view, '_mode_toolbar'):
             current_mode = view._mode_toolbar.get_current_mode()
             current_tool = view._mode_toolbar.get_current_tool()
+            select_enabled = False
+            try:
+                if hasattr(view._mode_toolbar, 'is_select_enabled'):
+                    select_enabled = view._mode_toolbar.is_select_enabled()
+            except Exception:
+                select_enabled = False
             
-            # 如果是编辑模式且选择了编辑模式的选择工具
+            # 独立选择开关
+            if current_mode == 'edit' and select_enabled and (current_tool is None or current_tool == 'edit_select'):
+                EventHandler._try_select_edit_object(view, screen_pos)
+                return
+
+            # 兼容旧逻辑：仍支持 edit_select 作为 tool
             if current_mode == 'edit' and current_tool == 'edit_select':
                 EventHandler._try_select_edit_object(view, screen_pos)
                 return
@@ -221,45 +260,18 @@ class EventHandler:
         """
         尝试在编辑模式下选择对象（点、线、面）
         使用屏幕空间选择方法，考虑深度和像素距离
-        
-        Parameters:
-        -----------
-        view : InteractiveView
-            交互式视图实例
-        screen_pos : QPoint
-            屏幕坐标
         """
         # 获取编辑模式管理器
-        if not hasattr(view, '_edit_mode_manager'):
-            return
-        
         edit_manager = view._edit_mode_manager
         
         # 优先使用屏幕空间选择（更准确，考虑深度）
         selected = edit_manager.select_at_screen_position(screen_pos, view, pixel_threshold=10)
-        
-        # 如果屏幕空间选择失败，回退到原来的世界坐标方法
-        if selected is None:
-            world_pos = CoordinateConverter.screen_to_world_raycast(view, screen_pos)
-            if world_pos is None:
-                # 如果转换失败，尝试使用焦点平面
-                world_pos = CoordinateConverter.screen_to_world(
-                    view, screen_pos, depth=0.0, clip_to_bounds=False
-                )
-            
-            if world_pos is not None:
-                # 执行选择（优先级：点 > 线 > 面，阈值0.1）
-                selected = edit_manager.select_at_position(world_pos)
         
         if selected is None:
             # 未选中任何对象，不执行操作
             if hasattr(view, 'status_message'):
                 view.status_message.emit('未选中任何对象')
             return
-        
-        # 选中了对象，聚焦到该对象
-        focus_point = selected['focus_point']
-        CameraController.focus_on_point(view, focus_point, zoom_factor=0.5)
         
         # 发送状态消息
         obj_type = selected['type']
@@ -274,27 +286,32 @@ class EventHandler:
         
         if hasattr(view, 'status_message'):
             view.status_message.emit(f'已选中{type_name}: {obj_id}')
-    
+        return
+
     @staticmethod
     def _try_create_point(view, screen_pos: QPoint):
         """
         尝试在编辑模式下创建点
-        
-        Parameters:
-        -----------
-        view : InteractiveView
-            交互式视图实例
-        screen_pos : QPoint
-            屏幕坐标
         """
-        # 获取点操作器
         if not hasattr(view, '_point_operator'):
             return
         
         point_operator = view._point_operator
         
-        # 创建点
-        point_id = point_operator.create_point_at_screen(screen_pos, view)
+        # 获取世界坐标
+        world_pos = CoordinateConverter.screen_to_world_raycast(view, screen_pos)
+        if world_pos is None:
+            world_pos = CoordinateConverter.screen_to_world(
+                view, screen_pos, depth=0.0, clip_to_bounds=False
+            )
+        
+        if world_pos is None:
+            if hasattr(view, 'status_message'):
+                view.status_message.emit('无法获取世界坐标')
+            return
+
+        # 使用世界坐标创建点
+        point_id = point_operator.create_point_at_world(world_pos, view)
         
         if point_id is not None:
             if hasattr(view, 'status_message'):
@@ -306,30 +323,65 @@ class EventHandler:
         else:
             if hasattr(view, 'status_message'):
                 view.status_message.emit('创建点失败')
-
+    
     @staticmethod
-    def _try_create_line(view, screen_pos: QPoint):
+    def _try_create_polyline(view,event, finalize: bool = False):
         """
-        尝试在编辑模式下创建线段（连续点击）
+        尝试在编辑模式下创建折线
         """
         if not hasattr(view, '_line_operator'):
             return
         line_operator = view._line_operator
-        line_id = line_operator.handle_click(screen_pos, view)
-        if line_id is not None and hasattr(view, 'status_message'):
-            view.status_message.emit(f'已创建线段: {line_id}')
+        polyline_id = line_operator.handle_polyline_click(event.pos(), view, finalize=finalize)
+        if polyline_id is not None and hasattr(view, 'status_message'):
+            view.status_message.emit(f'已创建折线: {polyline_id}')
 
     @staticmethod
-    def _try_create_plane(view, screen_pos: QPoint):
+    def _try_create_curve(view, event, finalize: bool = False):
         """
-        尝试在编辑模式下根据选中的线生成面
+        尝试在编辑模式下创建曲线（curve 工具）
+        - event: QMouseEvent（包含 pos() 和 button()）
+        - finalize: True 表示结束并生成曲线（通常由右键触发）
+        """
+        if not hasattr(view, '_line_operator'):
+            return
+        line_operator = view._line_operator
+        # Pass the event.pos() and finalize flag
+        curve_id = line_operator.handle_curve_click(event.pos(), view, finalize=finalize)
+        if curve_id is not None and hasattr(view, 'status_message'):
+            view.status_message.emit(f'已创建曲线: {curve_id}')
+
+    @staticmethod
+    def _try_select_for_plane(view, screen_pos: QPoint):
+        """
+        左键点击：选中点或线用于生成面
         """
         if not hasattr(view, '_plane_operator'):
             return
         plane_operator = view._plane_operator
-        plane_id = plane_operator.handle_click(screen_pos, view)
-        if plane_id is not None and hasattr(view, 'status_message'):
-            view.status_message.emit(f'已创建面: {plane_id}')
+        plane_operator.add_selection(screen_pos, view)
+    
+    @staticmethod
+    def _try_finalize_plane(view):
+        """
+        右键点击：根据已选中的点/线生成面
+        """
+        if not hasattr(view, '_plane_operator'):
+            return
+        plane_operator = view._plane_operator
+        plane_operator.finalize_plane(view)
+
+    @staticmethod
+    def _try_create_stretch(view, screen_pos: QPoint):
+        """
+        占位：拉伸工具的触发入口，调用 StretchOperator.handle_click
+        """
+        if not hasattr(view, '_stretch_operator'):
+            return
+        stretch_op = view._stretch_operator
+        pid = stretch_op.handle_click(screen_pos, view)
+        if pid is not None and hasattr(view, 'status_message'):
+            view.status_message.emit(f'拉伸目标点: {pid}')
 
     @staticmethod
     def _try_color_select(view, screen_pos: QPoint):
@@ -341,43 +393,4 @@ class EventHandler:
         color_selector = view._color_selector
         color_selector.handle_click(screen_pos, view)
     
-    @staticmethod
-    def _try_select_edit_object_for_drag(view, screen_pos: QPoint):
-        """
-        尝试在编辑模式下选择对象（用于拖拽）
-        使用屏幕空间选择方法
-        
-        Parameters:
-        -----------
-        view : InteractiveView
-            交互式视图实例
-        screen_pos : QPoint
-            屏幕坐标
-        
-        Returns:
-        --------
-        dict or None
-            选中的对象信息，如果未选中返回None
-        """
-        # 获取编辑模式管理器
-        if not hasattr(view, '_edit_mode_manager'):
-            return None
-        
-        edit_manager = view._edit_mode_manager
-        
-        # 优先使用屏幕空间选择
-        selected = edit_manager.select_at_screen_position(screen_pos, view, pixel_threshold=10)
-        
-        # 如果屏幕空间选择失败，回退到原来的方法
-        if selected is None:
-            world_pos = CoordinateConverter.screen_to_world_raycast(view, screen_pos)
-            if world_pos is None:
-                world_pos = CoordinateConverter.screen_to_world(
-                    view, screen_pos, depth=0.0, clip_to_bounds=False
-                )
-            
-            if world_pos is not None:
-                selected = edit_manager.select_at_position(world_pos)
-        
-        return selected
 

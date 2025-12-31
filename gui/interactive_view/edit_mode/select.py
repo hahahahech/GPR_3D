@@ -1,281 +1,37 @@
 """
-编辑模式相关逻辑
-实现点、线、面的选择和管理
+选择逻辑模块
+实现点、线、面的选择检测和处理
 """
 import numpy as np
-from typing import Optional, Dict, List, Tuple, Any
+from typing import Optional, Dict, List, Tuple, Any, Union
 from PyQt5.QtCore import QPoint
-import pyvista as pv
-from model.geometry import Point
+from gui.interactive_view.camera import CameraController
+from gui.interactive_view.coordinates import CoordinateConverter
+from model.geometry import Surface
 
-
-class EditModeManager:
-    """编辑模式管理器 - 管理点、线、面的数据和选择逻辑"""
+class SelectionManager:
+    """选择管理器 - 负责对象选择检测和处理逻辑"""
     
     # 选择阈值（世界坐标单位）
     SELECTION_THRESHOLD = 0.1
     
-    def __init__(self):
-        """初始化编辑模式管理器"""
-        # 存储点、线、面的数据
-        self._points: Dict[str, Point] = {}  # {id: Point对象}
-        self._lines: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}  # {id: (start, end)}
-        self._planes: Dict[str, np.ndarray] = {}  # {id: vertices (Nx3 array)}
-        # 只读/锁定集合（边界等不可操作对象）
-        self._locked_points: set = set()
-        self._locked_lines: set = set()
-        self._locked_planes: set = set()
-        # 颜色记录（RGB 0-1）
-        self._point_colors: Dict[str, Tuple[float, float, float]] = {}  # {id: (r,g,b)}
-        self._line_colors: Dict[str, Tuple[float, float, float]] = {}   # {id: (r,g,b)}
-        self._plane_colors: Dict[str, Tuple[float, float, float]] = {}  # {id: (r,g,b)}
-        
-        # 存储actor引用（用于渲染）
-        self._point_actors: Dict[str, Any] = {}  # {id: actor}
-        self._line_actors: Dict[str, Any] = {}  # {id: actor}
-        self._plane_actors: Dict[str, Any] = {}  # {id: actor}
-        self._plane_vertex_actors: Dict[str, List[Any]] = {}  # {id: [vertex actors]}
-        
-        # 当前选中的对象
-        self._selected_point_id: Optional[str] = None
-        self._selected_line_id: Optional[str] = None
-        self._selected_plane_id: Optional[str] = None
-    
-    # ========== 数据管理 ==========
-    
-    def add_point_object(self, point: Point, view=None, locked: bool = False) -> bool:
-        """
-        添加点对象（使用Point类）
-        """
-        if point.id in self._points:
-            return False  # 点已存在
-        self._points[point.id] = point
-        # 使用点自身颜色或默认
-        if point.id not in self._point_colors:
-            self._point_colors[point.id] = tuple(point.color) if getattr(point, "color", None) is not None else (1.0, 0.0, 0.0)
-        if locked:
-            self._locked_points.add(point.id)
+    def __init__(self, edit_manager):
+        """初始化选择管理器"""
+        self._edit_manager = edit_manager
 
-        # 如果提供了view，创建并添加actor
-        if view is not None:
-            self._render_point(point.id, view)
-        return True
+    def get_active_plane(self) -> Optional[str]:
+        """返回当前激活的面ID或 None"""
+        return self._edit_manager.active_plane_id
 
-    def add_point(self, point_id: str, position: np.ndarray, view=None, locked: bool = False) -> bool:
-        """
-        兼容旧接口：通过id和位置创建Point对象并添加
-        """
-        point = Point(id=point_id, position=np.array(position, dtype=np.float64))
-        return self.add_point_object(point, view, locked=locked)
-    
-    def add_line(self, line_id: str, start: np.ndarray, end: np.ndarray, view=None, color: Optional[tuple] = None, locked: bool = False) -> bool:
-        """
-        添加线
-        
-        Parameters:
-        -----------
-        line_id : str
-            线的唯一标识符
-        start : np.ndarray
-            起点 [x, y, z]
-        end : np.ndarray
-            终点 [x, y, z]
-        view : InteractiveView, optional
-            视图实例，如果提供则立即渲染
-        
-        Returns:
-        --------
-        bool
-            是否成功添加
-        """
-        if line_id in self._lines:
-            return False  # 线已存在
-        
-        self._lines[line_id] = (
-            np.array(start, dtype=np.float64),
-            np.array(end, dtype=np.float64)
-        )
-        if line_id not in self._line_colors:
-            if color is not None:
-                self._line_colors[line_id] = tuple(color)
-            else:
-                self._line_colors[line_id] = (0.0, 0.0, 1.0)  # blue
-        if locked:
-            self._locked_lines.add(line_id)
-        
-        # 如果提供了view，创建并添加actor
-        if view is not None:
-            self._render_line(line_id, view)
-        
-        return True
-    
-    def add_plane(self, plane_id: str, vertices: np.ndarray, view=None, color: Optional[tuple] = None, locked: bool = False) -> bool:
-        """
-        添加面
-        
-        Parameters:
-        -----------
-        plane_id : str
-            面的唯一标识符
-        vertices : np.ndarray
-            面的顶点 (Nx3 array)，至少3个点
-        view : InteractiveView, optional
-            视图实例，如果提供则立即渲染
-        
-        Returns:
-        --------
-        bool
-            是否成功添加
-        """
-        if plane_id in self._planes:
-            return False  # 面已存在
-        
-        vertices = np.array(vertices, dtype=np.float64)
-        if vertices.shape[0] < 3:
-            return False  # 至少需要3个点
-        
-        self._planes[plane_id] = vertices
-        if plane_id not in self._plane_colors:
-            if color is not None:
-                self._plane_colors[plane_id] = tuple(color)
-            else:
-                self._plane_colors[plane_id] = (0.0, 1.0, 0.0)  # green
-        if locked:
-            self._locked_planes.add(plane_id)
-        
-        # 如果提供了view，创建并添加actor
-        if view is not None:
-            self._render_plane(plane_id, view)
-        
-        return True
-    
-    def remove_point(self, point_id: str, view=None) -> bool:
-        """移除点"""
-        if point_id in self._locked_points:
-            return False
-        if point_id not in self._points:
-            return False
-        
-        # 移除actor
-        if point_id in self._point_actors and view is not None:
-            try:
-                view.remove_actor(self._point_actors[point_id])
-            except:
-                pass
-            del self._point_actors[point_id]
-        
-        del self._points[point_id]
-        if point_id in self._point_colors:
-            del self._point_colors[point_id]
-        
-        # 如果当前选中，清除选择
-        if self._selected_point_id == point_id:
-            self._selected_point_id = None
-        
-        return True
-    
-    def remove_line(self, line_id: str, view=None) -> bool:
-        """移除线"""
-        if line_id in self._locked_lines:
-            return False
-        if line_id not in self._lines:
-            return False
-        
-        # 移除actor
-        if line_id in self._line_actors and view is not None:
-            try:
-                view.remove_actor(self._line_actors[line_id])
-            except:
-                pass
-            del self._line_actors[line_id]
-        
-        del self._lines[line_id]
-        if line_id in self._line_colors:
-            del self._line_colors[line_id]
-        
-        # 如果当前选中，清除选择
-        if self._selected_line_id == line_id:
-            self._selected_line_id = None
-        
-        return True
-    
-    def remove_plane(self, plane_id: str, view=None) -> bool:
-        """移除面"""
-        if plane_id in self._locked_planes:
-            return False
-        if plane_id not in self._planes:
-            return False
-        
-        # 移除actor
-        if plane_id in self._plane_actors and view is not None:
-            try:
-                view.remove_actor(self._plane_actors[plane_id])
-            except:
-                pass
-            del self._plane_actors[plane_id]
-
-        # 移除顶点标记actors
-        if plane_id in self._plane_vertex_actors and view is not None:
-            for actor in self._plane_vertex_actors[plane_id]:
-                try:
-                    view.remove_actor(actor)
-                except:
-                    pass
-            del self._plane_vertex_actors[plane_id]
-        
-        del self._planes[plane_id]
-        if plane_id in self._plane_colors:
-            del self._plane_colors[plane_id]
-        
-        # 如果当前选中，清除选择
-        if self._selected_plane_id == plane_id:
-            self._selected_plane_id = None
-        
-        return True
-    
-    def clear_all(self, view=None):
-        """清除所有点、线、面"""
-        # 清除所有点
-        point_ids = list(self._points.keys())
-        for point_id in point_ids:
-            self.remove_point(point_id, view)
-        
-        # 清除所有线
-        line_ids = list(self._lines.keys())
-        for line_id in line_ids:
-            self.remove_line(line_id, view)
-        
-        # 清除所有面
-        plane_ids = list(self._planes.keys())
-        for plane_id in plane_ids:
-            self.remove_plane(plane_id, view)
+    def get_active_plane_vertices(self) -> Optional[np.ndarray]:
+        """返回当前激活面的顶点坐标或 None"""
+        return self._edit_manager.get_active_plane_vertices()
     
     # ========== 距离计算 ==========
     
     @staticmethod
-    def distance_point_to_point(point1: np.ndarray, point2: np.ndarray) -> float:
-        """计算点到点的距离"""
-        return np.linalg.norm(point1 - point2)
-    
-    @staticmethod
     def distance_point_to_line(point: np.ndarray, line_start: np.ndarray, line_end: np.ndarray) -> float:
-        """
-        计算点到线段的最短距离
-        
-        Parameters:
-        -----------
-        point : np.ndarray
-            点坐标 [x, y, z]
-        line_start : np.ndarray
-            线段起点 [x, y, z]
-        line_end : np.ndarray
-            线段终点 [x, y, z]
-        
-        Returns:
-        --------
-        float
-            最短距离
-        """
+        """计算点到线段的最短距离"""
         # 线段方向向量
         line_vec = line_end - line_start
         line_len = np.linalg.norm(line_vec)
@@ -303,21 +59,7 @@ class EditModeManager:
     
     @staticmethod
     def distance_point_to_plane(point: np.ndarray, plane_vertices: np.ndarray) -> float:
-        """
-        计算点到面的最短距离（点到面的距离）
-        
-        Parameters:
-        -----------
-        point : np.ndarray
-            点坐标 [x, y, z]
-        plane_vertices : np.ndarray
-            面的顶点 (Nx3 array)
-        
-        Returns:
-        --------
-        float
-            最短距离
-        """
+        """计算点到面的最短距离（点到面的距离）"""
         if plane_vertices.shape[0] < 3:
             return float('inf')
         
@@ -335,7 +77,7 @@ class EditModeManager:
         normal = normal / normal_len
         
         # 计算点到面的距离
-        # 使用面上任意一点（第一个顶点）
+        # 使用面上任意一点（第一个点）
         plane_point = plane_vertices[0]
         point_vec = point - plane_point
         
@@ -351,18 +93,6 @@ class EditModeManager:
         """
         判断点是否在多边形内（屏幕空间）
         使用射线法（Ray Casting Algorithm）
-        
-        Parameters:
-        -----------
-        point : np.ndarray
-            点坐标 [x, y]
-        vertices : np.ndarray
-            多边形顶点 (Nx2)
-        
-        Returns:
-        --------
-        bool
-            点是否在多边形内
         """
         x, y = point[0], point[1]
         n = len(vertices)
@@ -384,31 +114,121 @@ class EditModeManager:
         
         return inside
     
+    def _select_points_at_screen(self, renderer, camera_pos, vtk_x, vtk_y, pixel_threshold):
+        """检测屏幕位置的点候选对象"""
+        candidates = []
+        for point_id, point_obj in self._edit_manager.points.items():
+            pos = point_obj.position
+            renderer.SetWorldPoint(pos[0], pos[1], pos[2], 1.0)
+            renderer.WorldToDisplay()
+            display_pos = renderer.GetDisplayPoint()
+            screen_dist = np.sqrt((display_pos[0] - vtk_x)**2 + (display_pos[1] - vtk_y)**2)
+            
+            if screen_dist <= pixel_threshold:
+                depth = np.linalg.norm(pos - camera_pos)
+                candidates.append({
+                    'type': 'point',
+                    'id': point_id,
+                    'screen_dist': screen_dist,
+                    'depth': depth,
+                    'data': pos.copy(),
+                    'focus_point': pos.copy()
+                })
+        return candidates
+    
+    def _select_lines_at_screen(self, renderer, camera_pos, vtk_x, vtk_y, pixel_threshold):
+        """检测屏幕位置的线候选对象"""
+        candidates = []
+        for line_id, (start, end) in self._edit_manager.lines.items():
+            try:
+                if isinstance(start, str):
+                    start_pos = self._edit_manager.points[start].position
+                else:
+                    start_pos = np.array(start, dtype=np.float64)
+                if isinstance(end, str):
+                    end_pos = self._edit_manager.points[end].position
+                else:
+                    end_pos = np.array(end, dtype=np.float64)
+            except Exception:
+                continue
+            
+            # 投影起点和终点到屏幕
+            renderer.SetWorldPoint(start_pos[0], start_pos[1], start_pos[2], 1.0)
+            renderer.WorldToDisplay()
+            start_screen = np.array(renderer.GetDisplayPoint()[:2])
+            
+            renderer.SetWorldPoint(end_pos[0], end_pos[1], end_pos[2], 1.0)
+            renderer.WorldToDisplay()
+            end_screen = np.array(renderer.GetDisplayPoint()[:2])
+            
+            # 计算点到线段的距离
+            click_screen = np.array([vtk_x, vtk_y])
+            line_vec = end_screen - start_screen
+            line_len = np.linalg.norm(line_vec)
+            
+            if line_len < 1e-6:
+                screen_dist = np.linalg.norm(click_screen - start_screen)
+            else:
+                t = np.dot(click_screen - start_screen, line_vec) / (line_len ** 2)
+                t = np.clip(t, 0.0, 1.0)
+                closest_point = start_screen + t * line_vec
+                screen_dist = np.linalg.norm(click_screen - closest_point)
+            
+            if screen_dist <= pixel_threshold:
+                mid_pos = (start_pos + end_pos) / 2.0
+                depth = np.linalg.norm(mid_pos - camera_pos)
+                candidates.append({
+                    'type': 'line',
+                    'id': line_id,
+                    'screen_dist': screen_dist,
+                    'depth': depth,
+                    'data': (start_pos.copy(), end_pos.copy()),
+                    'focus_point': mid_pos
+                })
+        return candidates
+    
+    def _select_planes_at_screen(self, renderer, camera_pos, vtk_x, vtk_y, pixel_threshold):
+        """检测屏幕位置的面候选对象"""
+        candidates = []
+        for plane_id, vertices in self._edit_manager.planes.items():
+            # 将面的顶点投影到屏幕
+            screen_vertices = []
+            for vertex in vertices:
+                renderer.SetWorldPoint(vertex[0], vertex[1], vertex[2], 1.0)
+                renderer.WorldToDisplay()
+                display_pos = renderer.GetDisplayPoint()
+                screen_vertices.append([display_pos[0], display_pos[1]])
+
+            screen_vertices = np.array(screen_vertices)
+            click_screen = np.array([vtk_x, vtk_y])
+
+            # 检查点击是否在面的屏幕投影内
+            inside = self._point_in_polygon(click_screen, screen_vertices)
+
+            if inside:
+                screen_dist = 0.0
+            else:
+                center_screen = np.mean(screen_vertices, axis=0)
+                screen_dist = np.linalg.norm(click_screen - center_screen)
+
+            if inside or screen_dist <= pixel_threshold:
+                center = np.mean(vertices, axis=0)
+                depth = np.linalg.norm(center - camera_pos)
+                # 检测是否为边界面
+                is_boundary = plane_id.startswith('boundary_')
+                candidates.append({
+                    'type': 'plane',
+                    'id': plane_id,
+                    'screen_dist': screen_dist,
+                    'depth': depth,
+                    'data': vertices.copy(),
+                    'focus_point': center,
+                    'is_boundary': is_boundary
+                })
+        return candidates
+    
     def select_at_screen_position(self, screen_pos: QPoint, view, pixel_threshold: int = 10) -> Optional[Dict[str, Any]]:
-        """
-        在屏幕坐标位置选择对象（基于屏幕像素距离，考虑深度）
-        
-        Parameters:
-        -----------
-        screen_pos : QPoint
-            屏幕坐标（像素）
-        view : InteractiveView
-            视图实例
-        pixel_threshold : int
-            屏幕像素阈值，默认10像素
-        
-        Returns:
-        --------
-        dict or None
-            选中的对象信息，格式：
-            {
-                'type': 'point' | 'line' | 'plane',
-                'id': str,
-                'data': ...  # 对象数据
-                'focus_point': np.ndarray  # 聚焦点
-            }
-            如果未选中任何对象，返回None
-        """
+        """在屏幕坐标位置选择对象（基于屏幕像素距离，考虑深度） """
         renderer = view.renderer
         width = view.width()
         height = view.height()
@@ -421,153 +241,74 @@ class EditModeManager:
         vtk_x = screen_pos.x()
         vtk_y = height - screen_pos.y() - 1
         
-        # 候选对象列表（按优先级和深度排序）
+        # 按顺序检测：点 > 线 > 面
         candidates = []
         
-        # 1. 检查点
-        for point_id, point_obj in self._points.items():
-            # 将世界坐标转换为屏幕坐标
-            point_pos = point_obj.position
-            display_pos = [0.0, 0.0, 0.0]
-            renderer.SetWorldPoint(point_pos[0], point_pos[1], point_pos[2], 1.0)
-            renderer.WorldToDisplay()
-            display_pos = renderer.GetDisplayPoint()
-            
-            # 计算屏幕像素距离
-            screen_dist = np.sqrt(
-                (display_pos[0] - vtk_x) ** 2 + 
-                (display_pos[1] - vtk_y) ** 2
-            )
-            
-            if screen_dist <= pixel_threshold:
-                # 计算到相机的距离（用于深度排序）
-                depth = np.linalg.norm(point_pos - camera_pos)
-                candidates.append({
-                    'type': 'point',
-                    'id': point_id,
-                    'screen_dist': screen_dist,
-                    'depth': depth,
-                    'data': point_pos.copy(),
-                    'focus_point': point_pos.copy()
-                })
+        # 1. 检测点
+        point_candidates = self._select_points_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
+        candidates.extend(point_candidates)
         
-        # 2. 检查线
-        for line_id, (start, end) in self._lines.items():
-            # 将线的两个端点投影到屏幕
-            start_display = [0.0, 0.0, 0.0]
-            end_display = [0.0, 0.0, 0.0]
-            
-            renderer.SetWorldPoint(start[0], start[1], start[2], 1.0)
-            renderer.WorldToDisplay()
-            start_display = renderer.GetDisplayPoint()
-            
-            renderer.SetWorldPoint(end[0], end[1], end[2], 1.0)
-            renderer.WorldToDisplay()
-            end_display = renderer.GetDisplayPoint()
-            
-            # 计算点到线段的屏幕距离
-            start_screen = np.array([start_display[0], start_display[1]])
-            end_screen = np.array([end_display[0], end_display[1]])
-            click_screen = np.array([vtk_x, vtk_y])
-            
-            # 计算点到线段的屏幕距离
-            line_vec = end_screen - start_screen
-            line_len = np.linalg.norm(line_vec)
-            
-            if line_len > 1e-6:
-                line_vec_normalized = line_vec / line_len
-                point_vec = click_screen - start_screen
-                t = np.dot(point_vec, line_vec_normalized)
-                t = np.clip(t, 0.0, line_len)
-                closest_screen = start_screen + line_vec_normalized * t
-                screen_dist = np.linalg.norm(click_screen - closest_screen)
-            else:
-                # 线段退化为点
-                screen_dist = np.linalg.norm(click_screen - start_screen)
-            
-            if screen_dist <= pixel_threshold:
-                # 计算线的中点到相机的距离
-                mid_point = (start + end) / 2.0
-                depth = np.linalg.norm(mid_point - camera_pos)
-                candidates.append({
-                    'type': 'line',
-                    'id': line_id,
-                    'screen_dist': screen_dist,
-                    'depth': depth,
-                    'data': (start.copy(), end.copy()),
-                    'focus_point': mid_point
-                })
+        # 2. 检测线
+        line_candidates = self._select_lines_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
+        candidates.extend(line_candidates)
         
-        # 3. 检查面
-        for plane_id, vertices in self._planes.items():
-            # 将面的顶点投影到屏幕
-            screen_vertices = []
-            for vertex in vertices:
-                display_pos = [0.0, 0.0, 0.0]
-                renderer.SetWorldPoint(vertex[0], vertex[1], vertex[2], 1.0)
-                renderer.WorldToDisplay()
-                display_pos = renderer.GetDisplayPoint()
-                screen_vertices.append([display_pos[0], display_pos[1]])
-            
-            screen_vertices = np.array(screen_vertices)
-            click_screen = np.array([vtk_x, vtk_y])
-            
-            # 检查点击是否在面的屏幕投影内
-            inside = self._point_in_polygon(click_screen, screen_vertices)
-            
-            if inside:
-                # 如果点在面内，屏幕距离为0
-                screen_dist = 0.0
-            else:
-                # 计算点到面的屏幕距离（使用面的中心点）
-                center_screen = np.mean(screen_vertices, axis=0)
-                screen_dist = np.linalg.norm(click_screen - center_screen)
-            
-            if inside or screen_dist <= pixel_threshold:
-                # 计算面的中心到相机的距离
-                center = np.mean(vertices, axis=0)
-                depth = np.linalg.norm(center - camera_pos)
-                candidates.append({
-                    'type': 'plane',
-                    'id': plane_id,
-                    'screen_dist': screen_dist,
-                    'depth': depth,
-                    'data': vertices.copy(),
-                    'focus_point': center
-                })
+        # 3. 检测面
+        plane_candidates = self._select_planes_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
+        candidates.extend(plane_candidates)
         
         # 如果没有候选对象，返回None
         if not candidates:
-            self._selected_point_id = None
-            self._selected_line_id = None
-            self._selected_plane_id = None
+            self._edit_manager._selected_point_id = None
+            self._edit_manager._selected_line_id = None
+            self._edit_manager._selected_plane_id = None
+            self._edit_manager.set_active_plane(None)
             return None
         
-        # 排序：优先级（点>线>面），然后按深度（最近优先），最后按屏幕距离
-        priority_order = {'point': 0, 'line': 1, 'plane': 2}
+        # 排序：按类型优先级（点>线>面），面中生成的面优先于边界面，然后按深度，最后按屏幕距离
+        type_priority = {'point': 0, 'line': 1, 'plane': 2}
         candidates.sort(key=lambda x: (
-            priority_order[x['type']],  # 优先级
-            x['depth'],  # 深度（最近优先）
-            x['screen_dist']  # 屏幕距离
+            type_priority[x['type']], 
+            x.get('is_boundary', False),  # 生成的面(False)优先于边界面(True)
+            x['depth'], 
+            x['screen_dist']
         ))
-        
-        # 选择第一个候选对象
+
+        # 根据选中对象类型更新状态
         selected = candidates[0]
+        sel_type = selected['type']
         
-        # 更新选择状态
-        if selected['type'] == 'point':
-            self._selected_point_id = selected['id']
-            self._selected_line_id = None
-            self._selected_plane_id = None
-        elif selected['type'] == 'line':
-            self._selected_point_id = None
-            self._selected_line_id = selected['id']
-            self._selected_plane_id = None
-        elif selected['type'] == 'plane':
-            self._selected_point_id = None
-            self._selected_line_id = None
-            self._selected_plane_id = selected['id']
-        
+        if sel_type == 'point':
+            self._edit_manager._selected_point_id = selected['id']
+            self._edit_manager._selected_line_id = None
+            self._edit_manager._selected_plane_id = None
+            self._edit_manager.set_active_plane(None)
+        elif sel_type == 'line':
+            self._edit_manager._selected_point_id = None
+            self._edit_manager._selected_line_id = selected['id']
+            self._edit_manager._selected_plane_id = None
+            self._edit_manager.set_active_plane(None)
+        elif sel_type == 'plane':
+            self._edit_manager._selected_point_id = None
+            self._edit_manager._selected_line_id = None
+            self._edit_manager._selected_plane_id = selected['id']
+            self._edit_manager.set_active_plane(selected['id'])
+            
+            # 聚焦到面
+            plane_data = self._edit_manager.planes.get(self._edit_manager._selected_plane_id)
+            if plane_data is not None:
+                if hasattr(plane_data, 'vertices') and hasattr(plane_data, 'normal'):
+                    # Surface 对象，直接使用
+                    CameraController.focus_on_plane(view, plane_data)
+                else:
+                    # 旧的顶点数组格式，创建临时 Surface 对象
+                    temp_surface = Surface(
+                        id=self._edit_manager._selected_plane_id,
+                        vertices=plane_data,
+                        surface_type='polygon'
+                    )
+                    CameraController.focus_on_plane(view, temp_surface)
+
+
         return {
             'type': selected['type'],
             'id': selected['id'],
@@ -576,88 +317,26 @@ class EditModeManager:
         }
     
     def select_at_position(self, world_pos: np.ndarray) -> Optional[Dict[str, Any]]:
-        """
-        在指定世界坐标位置选择对象（优先级：点 > 线 > 面）
-        
-        Parameters:
-        -----------
-        world_pos : np.ndarray
-            世界坐标位置 [x, y, z]
-        
-        Returns:
-        --------
-        dict or None
-            选中的对象信息，格式：
-            {
-                'type': 'point' | 'line' | 'plane',
-                'id': str,
-                'data': ...  # 对象数据
-            }
-            如果未选中任何对象，返回None
-        """
+        """在指定世界坐标位置选择面对象"""
+        # 仅检查面，忽略点与线的选择逻辑
         threshold = self.SELECTION_THRESHOLD
-        
-        # 1. 优先检查点
-        closest_point_id = None
-        min_point_distance = threshold
-        
-        for point_id, point_obj in self._points.items():
-            distance = self.distance_point_to_point(world_pos, point_obj.position)
-            if distance < min_point_distance:
-                min_point_distance = distance
-                closest_point_id = point_id
-        
-        if closest_point_id is not None:
-            self._selected_point_id = closest_point_id
-            self._selected_line_id = None
-            self._selected_plane_id = None
-            return {
-                'type': 'point',
-                'id': closest_point_id,
-                'data': self._points[closest_point_id].position.copy(),
-                'focus_point': self._points[closest_point_id].position.copy()
-            }
-        
-        # 2. 检查线
-        closest_line_id = None
-        min_line_distance = threshold
-        
-        for line_id, (start, end) in self._lines.items():
-            distance = self.distance_point_to_line(world_pos, start, end)
-            if distance < min_line_distance:
-                min_line_distance = distance
-                closest_line_id = line_id
-        
-        if closest_line_id is not None:
-            self._selected_point_id = None
-            self._selected_line_id = closest_line_id
-            self._selected_plane_id = None
-            # 计算线的中点
-            start, end = self._lines[closest_line_id]
-            focus_point = (start + end) / 2.0
-            return {
-                'type': 'line',
-                'id': closest_line_id,
-                'data': (start.copy(), end.copy()),
-                'focus_point': focus_point
-            }
-        
-        # 3. 检查面
         closest_plane_id = None
         min_plane_distance = float('inf')
-        
-        for plane_id, vertices in self._planes.items():
-            distance = self.distance_point_to_plane(world_pos, vertices)
+        for plane_id, vertices in self._edit_manager.planes.items():
+            try:
+                distance = self.distance_point_to_plane(world_pos, vertices)
+            except Exception:
+                continue
             if distance < min_plane_distance:
                 min_plane_distance = distance
                 closest_plane_id = plane_id
-        
+
         if closest_plane_id is not None and min_plane_distance < threshold:
-            self._selected_point_id = None
-            self._selected_line_id = None
-            self._selected_plane_id = closest_plane_id
-            # 计算面的中心点
-            vertices = self._planes[closest_plane_id]
+            self._edit_manager._selected_point_id = None
+            self._edit_manager._selected_line_id = None
+            self._edit_manager._selected_plane_id = closest_plane_id
+            self._edit_manager.set_active_plane(closest_plane_id)
+            vertices = self._edit_manager.planes[closest_plane_id]
             focus_point = np.mean(vertices, axis=0)
             return {
                 'type': 'plane',
@@ -667,246 +346,232 @@ class EditModeManager:
             }
         
         # 未选中任何对象
-        self._selected_point_id = None
-        self._selected_line_id = None
-        self._selected_plane_id = None
+        self._edit_manager._selected_point_id = None
+        self._edit_manager._selected_line_id = None
+        self._edit_manager._selected_plane_id = None
+        self._edit_manager.set_active_plane(None)
         return None
     
-    # ========== 渲染相关 ==========
+    # ========== 选择处理逻辑 ==========
     
-    def _render_point(self, point_id: str, view):
-        """渲染点"""
-        if point_id not in self._points:
+    def handle_selection_and_action(self, view, screen_pos: QPoint):
+        """
+        处理选择和操作逻辑
+        1. 检测选中的对象
+        2. 根据对象类型执行相应操作
+        """
+        # 1. 检测选中的对象
+        selected = self.detect_selected_object(view, screen_pos)
+        
+        if selected is None:
+            # 未选中任何对象
+            self.clear_selection()
             return
         
-        point_obj = self._points[point_id]
-        # 兼容历史数据：如果是 ndarray，转换为 Point
-        if not isinstance(point_obj, Point):
-            point_obj = Point(id=point_id, position=np.array(point_obj, dtype=np.float64))
-            self._points[point_id] = point_obj
-        position = point_obj.position
-        
-        # 创建点mesh
-        point_mesh = pv.PolyData([position])
-        
-        # 添加到场景
-        color = self._point_colors.get(point_id, (1.0, 0.0, 0.0))
-        actor = view.add_mesh(
-            point_mesh,
-            color=color,
-            point_size=10,
-            render_points_as_spheres=True,
-            name=f'edit_point_{point_id}'
-        )
-        if point_id.startswith("boundary_point_"):
-            try:
-                actor.GetProperty().SetPointSize(8)
-            except:
-                pass
-        
-        self._point_actors[point_id] = actor
+        # 2. 根据对象类型处理
+        if selected['type'] == 'point':
+            self.handle_point_selection(selected, view, screen_pos)
+        elif selected['type'] == 'line':
+            self.handle_line_selection(selected, view)
+        elif selected['type'] == 'plane':
+            self.handle_plane_selection(selected, view)
     
-    def _render_line(self, line_id: str, view):
-        """渲染线"""
-        if line_id not in self._lines:
+    def detect_selected_object(self, view, screen_pos: QPoint):
+        """
+        检测选中的对象
+        """
+        # 优先使用屏幕空间选择
+        selected = self.select_at_screen_position(screen_pos, view, pixel_threshold=10)
+        
+        # 如果屏幕空间选择失败，回退到原来的方法
+        if selected is None:
+            world_pos = CoordinateConverter.screen_to_world_raycast(view, screen_pos)
+            if world_pos is None:
+                world_pos = CoordinateConverter.screen_to_world(
+                    view, screen_pos, depth=0.0, clip_to_bounds=False
+                )
+            
+            if world_pos is not None:
+                selected = self.select_at_position(world_pos)
+        
+        return selected
+    
+    def handle_point_selection(self, selected, view, screen_pos: QPoint):
+        """
+        处理点选择逻辑
+        """
+        point_id = selected['id']
+        
+        # 1. 设置选中状态
+        self.set_point_selected(point_id)
+        
+        # 2. 检查锁定状态
+        if self.is_point_locked(point_id):
+            # 锁定点只选择，不拖拽
+            self.send_selection_message(view, selected)
             return
         
-        start, end = self._lines[line_id]
-        
-        # 创建线mesh
-        points = np.array([start, end])
-        lines = np.array([2, 0, 1], dtype=np.int32)
-        line_mesh = pv.PolyData(points, lines=lines)
-        
-        # 添加到场景
-        color = self._line_colors.get(line_id, (0.0, 0.0, 1.0))
-        actor = view.add_mesh(
-            line_mesh,
-            color=color,
-            line_width=3,
-            name=f'edit_line_{line_id}'
-        )
-        if line_id.startswith("boundary_line_"):
-            try:
-                actor.GetProperty().SetLineWidth(2.0)
-            except:
-                pass
-        
-        self._line_actors[line_id] = actor
+        # 3. 启动拖拽
+        if hasattr(view, '_point_operator'):
+            view._point_operator.start_drag(point_id, screen_pos, view)
     
-    def _render_plane(self, plane_id: str, view):
-        """渲染面"""
-        if plane_id not in self._planes:
-            return
+    def handle_line_selection(self, selected, view):
+        """
+        处理线选择逻辑
+        """
+        line_id = selected['id']
+        self.set_line_selected(line_id)
+        self.send_selection_message(view, selected)
+    
+    def handle_plane_selection(self, selected, view):
+        """
+        处理面选择逻辑
+        """
+        plane_id = selected['id']
+        self.set_plane_selected(plane_id)
+        self.send_selection_message(view, selected)
+    
+    def set_point_selected(self, point_id: str):
+        """
+        设置点选中状态
+        """
+        self._edit_manager._selected_point_id = point_id
+        self._edit_manager._selected_line_id = None
+        self._edit_manager._selected_plane_id = None
+        self._edit_manager.set_active_plane(None)
+    
+    def set_line_selected(self, line_id: str):
+        """
+        设置线选中状态
+        """
+        self._edit_manager._selected_point_id = None
+        self._edit_manager._selected_line_id = line_id
+        self._edit_manager._selected_plane_id = None
+        self._edit_manager.set_active_plane(None)
+    
+    def set_plane_selected(self, plane_id: str):
+        """
+        设置面选中状态
+        """
+        self._edit_manager._selected_point_id = None
+        self._edit_manager._selected_line_id = None
+        self._edit_manager._selected_plane_id = plane_id
+        self._edit_manager.set_active_plane(plane_id)
+    
+    def clear_selection(self):
+        """
+        清除所有选择状态
+        """
+        self._edit_manager._selected_point_id = None
+        self._edit_manager._selected_line_id = None
+        self._edit_manager._selected_plane_id = None
+        self._edit_manager.set_active_plane(None)
+    
+    def is_point_locked(self, point_id: str) -> bool:
+        """
+        检查点是否被锁定
+        """
+        locked_points = self._edit_manager.locked_points
+        return point_id in locked_points
+    
+    def send_selection_message(self, view, selected):
+        """
+        发送选择状态消息
+        """
+        if hasattr(view, 'status_message'):
+            obj_type = selected['type']
+            obj_id = selected['id']
+            
+            type_names = {
+                'point': '点',
+                'line': '线',
+                'plane': '面'
+            }
+            type_name = type_names.get(obj_type, obj_type)
+            view.status_message.emit(f'已选中{type_name}: {obj_id}')
+    
+    # ========== 视觉高亮功能 ==========
+    
+    def highlight_object(self, obj_type: str, obj_id: str, view, highlight_color=(1.0, 1.0, 0.0)):
+        """
+        高亮对象（改变颜色）
+        """
+        # 保存原始颜色
+        original_color = self._get_object_color(obj_type, obj_id)
         
-        vertices = self._planes[plane_id]
+        # 设置高亮颜色
+        self._set_object_color(obj_type, obj_id, highlight_color, view)
         
-        # 创建面mesh（使用第一个点作为中心，创建三角形扇）
-        # 简化实现：假设面是凸多边形
-        if vertices.shape[0] == 3:
-            # 三角形
-            faces = np.array([3, 0, 1, 2], dtype=np.int32)
-        elif vertices.shape[0] == 4:
-            # 四边形（两个三角形）
-            faces = np.array([3, 0, 1, 2, 3, 0, 2, 3], dtype=np.int32)
+        # 返回原始颜色用于恢复
+        return original_color
+    
+    def restore_object_color(self, obj_type: str, obj_id: str, original_color, view):
+        """
+        恢复对象的原始颜色
+        """
+        self._set_object_color(obj_type, obj_id, original_color, view)
+    
+    def _get_object_color(self, obj_type: str, obj_id: str):
+        """
+        获取对象的当前颜色
+        """
+        if obj_type == 'point':
+            return self._edit_manager._point_colors.get(obj_id, (1.0, 0.0, 0.0))
+        elif obj_type == 'line':
+            return self._edit_manager._line_colors.get(obj_id, (0.0, 0.0, 1.0))
+        elif obj_type == 'plane':
+            return self._edit_manager._plane_colors.get(obj_id, (0.0, 1.0, 0.0))
         else:
-            # 多边形（使用第一个点作为中心，创建三角形扇）
-            faces = []
-            for i in range(1, vertices.shape[0] - 1):
-                faces.extend([3, 0, i, i + 1])
-            faces = np.array(faces, dtype=np.int32)
+            return (1.0, 1.0, 1.0)  # 默认白色
+    
+    def _set_object_color(self, obj_type: str, obj_id: str, color: tuple, view):
+        """
+        设置对象颜色
+        """
+        if obj_type == 'point':
+            self._edit_manager.set_point_color(obj_id, color, view)
+        elif obj_type == 'line':
+            self._edit_manager.set_line_color(obj_id, color, view)
+        elif obj_type == 'plane':
+            self._edit_manager.set_plane_color(obj_id, color, view)
+    
+    def switch_highlight(self, new_obj_type: str, new_obj_id: str, view, highlight_color=(1.0, 1.0, 0.0)):
+        """
+        切换高亮对象（恢复上一个，高亮新的）
+        """
+        # 如果有之前的高亮对象，先恢复其颜色
+        if hasattr(self, '_current_highlight'):
+            prev_type, prev_id, prev_color = self._current_highlight
+            self.restore_object_color(prev_type, prev_id, prev_color, view)
         
-        plane_mesh = pv.PolyData(vertices, faces=faces)
+        # 高亮新对象并保存信息
+        original_color = self.highlight_object(new_obj_type, new_obj_id, view, highlight_color)
+        self._current_highlight = (new_obj_type, new_obj_id, original_color)
         
-        # 添加到场景
-        color = self._plane_colors.get(plane_id, (0.0, 1.0, 0.0))
-        # 边界面使用浅灰色边缘，其他面使用深绿色
-        edge_color = 'lightgray' if plane_id.startswith('boundary_plane_') else 'darkgreen'
-        actor = view.add_mesh(
-            plane_mesh,
-            color=color,
-            opacity=0.5,
-            show_edges=True,
-            edge_color=edge_color,
-            name=f'edit_plane_{plane_id}'
-        )
-        if plane_id.startswith("boundary_plane_"):
-            try:
-                actor.GetProperty().SetOpacity(0.05)  # 非常透明，几乎看不见
-            except:
-                pass
-        
-        self._plane_actors[plane_id] = actor
+        return original_color
+    
+    def clear_highlight(self, view):
+        """
+        清除当前高亮
+        """
+        if hasattr(self, '_current_highlight'):
+            prev_type, prev_id, prev_color = self._current_highlight
+            self.restore_object_color(prev_type, prev_id, prev_color, view)
+            delattr(self, '_current_highlight')
+    
+    def get_current_highlight(self):
+        """
+        获取当前高亮对象信息
+        """
+        return getattr(self, '_current_highlight', None)
+    
+    # ========== 撤销/重做功能 ==========
 
-        # 面的顶点只作为数据存在，不渲染为视觉实体
-        # 只有用户明确创建的点（_points 中的 Point 对象）才会被渲染
-        self._plane_vertex_actors[plane_id] = []
-    
-    def update_rendering(self, view):
-        """更新所有对象的渲染"""
-        # 重新渲染所有点
-        for point_id in list(self._point_actors.keys()):
-            if point_id in self._points:
-                try:
-                    view.remove_actor(self._point_actors[point_id])
-                except:
-                    pass
-                self._render_point(point_id, view)
-        
-        # 重新渲染所有线
-        for line_id in list(self._line_actors.keys()):
-            if line_id in self._lines:
-                try:
-                    view.remove_actor(self._line_actors[line_id])
-                except:
-                    pass
-                self._render_line(line_id, view)
-        
-        # 重新渲染所有面
-        for plane_id in list(self._plane_actors.keys()):
-            if plane_id in self._planes:
-                try:
-                    view.remove_actor(self._plane_actors[plane_id])
-                except:
-                    pass
-                # 移除旧的顶点标记
-                if plane_id in self._plane_vertex_actors:
-                    for actor in self._plane_vertex_actors[plane_id]:
-                        try:
-                            view.remove_actor(actor)
-                        except:
-                            pass
-                self._render_plane(plane_id, view)
+    def undo(self, view=None) -> bool:
+        """执行撤销操作"""
+        return self._undo_manager.undo(view)
 
-    # ========== 颜色设置 ==========
-    def set_point_color(self, point_id: str, color: Tuple[float, float, float], view=None):
-        self._point_colors[point_id] = color
-        actor = self._point_actors.get(point_id)
-        if actor is not None:
-            try:
-                # 优先使用VTK Property 设置颜色，兼容不同版本
-                if hasattr(actor, "GetProperty"):
-                    actor.GetProperty().SetColor(*color)
-                if hasattr(actor, "prop"):
-                    actor.prop.set_color(*color)
-            except:
-                pass
-        if view is not None and actor is None and point_id in self._points:
-            self._render_point(point_id, view)
-        if view is not None:
-            try:
-                view.render()
-            except:
-                pass
-
-    def set_line_color(self, line_id: str, color: Tuple[float, float, float], view=None):
-        self._line_colors[line_id] = color
-        actor = self._line_actors.get(line_id)
-        if actor is not None:
-            try:
-                if hasattr(actor, "GetProperty"):
-                    actor.GetProperty().SetColor(*color)
-                if hasattr(actor, "prop"):
-                    actor.prop.set_color(*color)
-            except:
-                pass
-        if view is not None and actor is None and line_id in self._lines:
-            self._render_line(line_id, view)
-        if view is not None:
-            try:
-                view.render()
-            except:
-                pass
-
-    def set_plane_color(self, plane_id: str, color: Tuple[float, float, float], view=None):
-        self._plane_colors[plane_id] = color
-        actor = self._plane_actors.get(plane_id)
-        if actor is not None:
-            try:
-                if hasattr(actor, "GetProperty"):
-                    actor.GetProperty().SetColor(*color)
-                if hasattr(actor, "prop"):
-                    actor.prop.set_color(*color)
-            except:
-                pass
-        if view is not None and actor is None and plane_id in self._planes:
-            self._render_plane(plane_id, view)
-        if view is not None:
-            try:
-                view.render()
-            except:
-                pass
-    
-    # ========== 获取选中对象 ==========
-    
-    def get_selected_point(self) -> Optional[Tuple[str, np.ndarray]]:
-        """获取当前选中的点"""
-        if self._selected_point_id is None:
-            return None
-        return (self._selected_point_id, self._points[self._selected_point_id].position.copy())
-    
-    def get_selected_line(self) -> Optional[Tuple[str, Tuple[np.ndarray, np.ndarray]]]:
-        """获取当前选中的线"""
-        if self._selected_line_id is None:
-            return None
-        start, end = self._lines[self._selected_line_id]
-        return (self._selected_line_id, (start.copy(), end.copy()))
-    
-    def get_selected_plane(self) -> Optional[Tuple[str, np.ndarray]]:
-        """获取当前选中的面"""
-        if self._selected_plane_id is None:
-            return None
-        return (self._selected_plane_id, self._planes[self._selected_plane_id].copy())
-    
-    def get_all_points(self) -> Dict[str, np.ndarray]:
-        """获取所有点"""
-        return {k: v.position.copy() for k, v in self._points.items()}
-    
-    def get_all_lines(self) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
-        """获取所有线"""
-        return {k: (v[0].copy(), v[1].copy()) for k, v in self._lines.items()}
-    
-    def get_all_planes(self) -> Dict[str, np.ndarray]:
-        """获取所有面"""
-        return {k: v.copy() for k, v in self._planes.items()}
+    def redo(self, view=None) -> bool:
+        """执行重做操作"""
+        return self._undo_manager.redo(view)
 
