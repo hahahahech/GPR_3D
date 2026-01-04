@@ -10,7 +10,7 @@ import numpy as np
 from utils.undo import MovePointCommand, RemovePointCommand, RemoveLineCommand, RemovePolylineCommand, RemoveCurveCommand, RemovePlaneCommand
 from gui.dialog import CoordinateInputDialog
 from gui.interactive_view.camera import CameraController
-from model.geometry import Surface
+from model.geometry import Plane
 
 class SceneInspector(QWidget):
     """
@@ -106,8 +106,6 @@ class SceneInspector(QWidget):
 
         # 初始刷新
         self.refresh()
-
-    # ========== 刷新与构建树 ==========
     
     # ========== 辅助函数 ==========
     def _find_point_ids_by_pos(self, pos, points):
@@ -229,12 +227,18 @@ class SceneInspector(QWidget):
         used_point_ids = set()
         # 先收集显式折线和曲线的控制点
         polylines_explicit = getattr(self.edit_manager, '_polylines', {}) or {}
-        for plid, pids in polylines_explicit.items():
+        for plid, polyline_data in polylines_explicit.items():
+            # 适配新的数据结构
+            if isinstance(polyline_data, dict) and 'point_ids' in polyline_data:
+                pids = polyline_data['point_ids']
+            else:
+                pids = polyline_data  # 旧格式，直接是点ID列表
+            
             for pid in pids:
                 used_point_ids.add(pid)
         curves_meta = getattr(self.edit_manager, '_curves', {}) or {}
         for cid, meta in curves_meta.items():
-            for pid in meta.get('control_ids', []):
+            for pid in meta.get('control_point_ids', []):
                 used_point_ids.add(pid)
         # 其次，收集散落的单段线中涉及的点，将它们也视为已被使用
         for lid, (s, e) in lines.items():
@@ -280,7 +284,7 @@ class SceneInspector(QWidget):
 
         # 线分组根节点（只显示未组成面的线以避免重复）
         lines_root = QTreeWidgetItem(self.tree)
-        lines_root.setText(0, "线")
+        lines_root.setText(0, "折线")
         lines_root.setFlags(lines_root.flags() | Qt.ItemIsTristate | Qt.ItemIsUserCheckable)
         lines_root.setCheckState(0, Qt.Unchecked)
         rid = id(lines_root)
@@ -294,7 +298,13 @@ class SceneInspector(QWidget):
         # 显式折线优先并记录已包含的边以避免重复；过滤边界点
         polylines_explicit = getattr(self.edit_manager, '_polylines', {}) or {}
         included_edges = set()
-        for plid, pids in polylines_explicit.items():
+        for plid, polyline_data in polylines_explicit.items():
+            # 适配新的数据结构
+            if isinstance(polyline_data, dict) and 'point_ids' in polyline_data:
+                pids = polyline_data['point_ids']
+            else:
+                pids = polyline_data  # 旧格式，直接是点ID列表
+            
             filtered = [pid for pid in pids if not self._is_boundary_id(pid)]
             if len(filtered) < 2:
                 continue
@@ -412,7 +422,9 @@ class SceneInspector(QWidget):
             if ('curve', cid) in expanded_ids:
                 item.setExpanded(True)
             # 子项：控制点
-            for pid in curves_meta[cid].get('control_ids', []):
+            curve_data = curves_meta[cid]
+            control_point_ids = curve_data.get('control_point_ids', []) if isinstance(curve_data, dict) else []
+            for pid in control_point_ids:
                 child = QTreeWidgetItem(item)
                 child.setText(0, pid)
                 child.setFlags(child.flags() | Qt.ItemIsUserCheckable)

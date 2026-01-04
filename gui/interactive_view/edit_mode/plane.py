@@ -6,7 +6,7 @@
 from typing import Optional, List
 import numpy as np
 from PyQt5.QtCore import QPoint
-from model.geometry import Surface
+from model.geometry import Plane
 
 
 class PlaneOperator:
@@ -69,8 +69,8 @@ class PlaneOperator:
             vertices = self._build_polygon_vertices(self._selected_line_ids)
             if vertices is not None and vertices.shape[0] >= 3:
                 plane_id = self._generate_plane_id()
-                surface_obj = Surface(id=plane_id, vertices=vertices)
-                if self.edit_manager.add_plane(plane_id, surface_obj.vertices, view, color=surface_obj.color):
+                plane_obj = Plane(id=plane_id, vertices=vertices)
+                if self.edit_manager.add_plane(plane_id, plane_obj.vertices, view, color=plane_obj.color):
                     if hasattr(view, 'status_message'):
                         view.status_message.emit(f'已生成面(线): {plane_id}')
                     self.reset()
@@ -85,8 +85,8 @@ class PlaneOperator:
             vertices = self._build_polygon_from_points(self._selected_point_ids)
             if vertices is not None and vertices.shape[0] >= 3:
                 plane_id = self._generate_plane_id()
-                surface_obj = Surface(id=plane_id, vertices=vertices)
-                if self.edit_manager.add_plane(plane_id, surface_obj.vertices, view, color=surface_obj.color):
+                plane_obj = Plane(id=plane_id, vertices=vertices)
+                if self.edit_manager.add_plane(plane_id, plane_obj.vertices, view, color=plane_obj.color):
                     if hasattr(view, 'status_message'):
                         view.status_message.emit(f'已生成面(点): {plane_id}')
                     self.reset()

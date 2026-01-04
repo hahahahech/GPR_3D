@@ -329,13 +329,11 @@ class EditModeManager:
         """按 point ids 渲染折线（单一 actor）"""
         if polyline_id not in self._polylines:
             return
-        pids = self._polylines[polyline_id]
-        coords = []
-        for pid in pids:
-            pobj = self._points.get(pid)
-            if pobj is None:
-                continue
-            coords.append(pobj.position if hasattr(pobj, 'position') else np.array(pobj, dtype=np.float64))
+        
+        polyline_data = self._polylines[polyline_id]
+        polyline_obj = polyline_data['geometry']
+        coords = polyline_obj.get_vertices()
+        
         if len(coords) < 2:
             return
         line_mesh = pv.lines_from_points(np.array(coords))
@@ -348,18 +346,11 @@ class EditModeManager:
         if curve_id not in self._curves:
             return
         
-        curve_info = self._curves[curve_id]
-        control_point_ids = curve_info['control_point_ids']
-        degree = curve_info['degree']
-        num_points = curve_info['num_points']
-        
-        # 获取控制点坐标
-        control_points = []
-        for pid in control_point_ids:
-            pobj = self._points.get(pid)
-            if pobj is None:
-                continue
-            control_points.append(pobj.position if hasattr(pobj, 'position') else np.array(pobj, dtype=np.float64))
+        curve_data = self._curves[curve_id]
+        curve_obj = curve_data['geometry']
+        control_points = [cp.position for cp in curve_obj.control_points]
+        degree = curve_obj.degree
+        num_points = curve_obj.num_points
         
         if len(control_points) < 2:
             return

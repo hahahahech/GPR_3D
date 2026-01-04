@@ -7,7 +7,7 @@ import numpy as np
 from .coordinates import CoordinateConverter
 from .camera import CameraController
 from .edit_mode import EditModeManager, PointOperator, LineOperator, PlaneOperator, ColorSelector
-
+from vtkmodules.vtkRenderingCore import vtkCellPicker
 
 class EventHandler:
     """事件处理器 - 处理鼠标和键盘事件"""
@@ -42,7 +42,6 @@ class EventHandler:
                     EventHandler._try_create_point(view, event.pos())
                     return
 
-            
            # 编辑模式折线工具：左键添加控制点，右键生成折线
             if current_mode == 'edit' and current_tool == 'polyline':
                 # 左键用于添加控制点，右键用于结束并生成折线
@@ -89,37 +88,23 @@ class EventHandler:
                     EventHandler._try_color_select(view, event.pos())
                     return
             
-        
         # 对象选择（其他情况）
         if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.AltModifier):
             # 尝试选择对象
             EventHandler._try_select_object(view, event.pos())
             return
-        
+                
         # 检查按键组合（导航模式）
         modifiers = event.modifiers()
         button = event.button()
         
         if modifiers & Qt.AltModifier:
-            if button == Qt.LeftButton:
-                # Alt + 左键：旋转
-                view._is_rotating = True
-                view.setCursor(Qt.ClosedHandCursor)
-            elif button == Qt.MidButton:
+            if button == Qt.MidButton:
                 # Alt + 中键：平移
                 view._is_panning = True
                 view.setCursor(Qt.SizeAllCursor)
-            elif button == Qt.RightButton:
-                # Alt + 右键：缩放
-                view._is_zooming = True
-                view.setCursor(Qt.SizeVerCursor)
-        elif modifiers & Qt.ShiftModifier:
-            if button == Qt.MidButton:
-                # Shift + 中键：平移
-                view._is_panning = True
-                view.setCursor(Qt.SizeAllCursor)
         elif button == Qt.MidButton:
-            # 单独中键：旋转（备用方案）
+            # 单独中键：旋转
             view._is_rotating = True
             view.setCursor(Qt.ClosedHandCursor)
     
@@ -129,12 +114,7 @@ class EventHandler:
         # 更新坐标显示
         view._update_coordinate_display(event.pos())
         
-        # 检查是否在拖拽点
-        if hasattr(view, '_point_operator') and view._point_operator._is_dragging:
-            view._point_operator.update_drag(event.pos(), view)
-            view.view_changed.emit()
-            return
-        
+                
         if view._last_mouse_pos is None:
             view._last_mouse_pos = event.pos()
             return
@@ -155,10 +135,7 @@ class EventHandler:
     @staticmethod
     def mouse_release_event(view, event):
         """鼠标释放事件"""
-        # 结束点拖拽
-        if hasattr(view, '_point_operator') and view._point_operator._is_dragging:
-            view._point_operator.end_drag()
-        
+                
         view._is_rotating = False
         view._is_panning = False
         view._is_zooming = False
@@ -212,7 +189,6 @@ class EventHandler:
                 return
         
         # 其他情况使用原有的选择逻辑（物体模式等）
-        try:
             # 使用PyVista的pick功能
             width = view.width()
             height = view.height()
@@ -220,40 +196,29 @@ class EventHandler:
             vtk_y = height - screen_pos.y() - 1
             
             # 尝试使用CellPicker
-            try:
-                from vtkmodules.vtkRenderingCore import vtkCellPicker
-                picker = vtkCellPicker()
-                picker.SetTolerance(0.001)
-                
-                if picker.Pick(vtk_x, vtk_y, 0, view.renderer):
-                    actor = picker.GetActor()
-                    if actor:
-                        # 获取actor的名称（应该是对象的ID）
-                        prop = actor.GetProperty()
-                        # 尝试从actor获取对象ID
-                        # PyVista的actor可能存储了名称信息
-                        try:
-                            # 通过actor的mapper获取数据
-                            mapper = actor.GetMapper()
-                            if mapper:
-                                # 尝试从plotter的actors字典中查找
-                                # 这是一个简化的实现，实际可能需要更复杂的查找
-                                obj_id = None
-                                # 遍历plotter的actors查找匹配的actor
-                                for name, plotter_actor in view.actors.items():
-                                    if plotter_actor == actor:
-                                        obj_id = name
-                                        break
-                                
-                                if obj_id:
-                                    # 对象选择处理（简化实现）
-                                    pass
-                        except:
-                            pass
-            except:
-                pass
-        except:
-            pass
+
+            picker = vtkCellPicker()
+            picker.SetTolerance(0.001)
+            
+            if picker.Pick(vtk_x, vtk_y, 0, view.renderer):
+                actor = picker.GetActor()
+                if actor:
+                    # 获取actor的名称（应该是对象的ID）
+                    # prop = actor.GetProperty()
+                    # 尝试从actor获取对象ID
+                    # PyVista的actor可能存储了名称信息
+                       
+                    # 通过actor的mapper获取数据
+                    mapper = actor.GetMapper()
+                    if mapper:
+                        # 尝试从plotter的actors字典中查找
+                        # 这是一个简化的实现，实际可能需要更复杂的查找
+                        obj_id = None
+                            # 遍历plotter的actors查找匹配的actor
+                        for name, plotter_actor in view.actors.items():
+                            if plotter_actor == actor:
+                                obj_id = name
+                                break
     
     @staticmethod
     def _try_select_edit_object(view, screen_pos: QPoint):
@@ -284,8 +249,17 @@ class EventHandler:
         }
         type_name = type_names.get(obj_type, obj_type)
         
-        if hasattr(view, 'status_message'):
-            view.status_message.emit(f'已选中{type_name}: {obj_id}')
+        # 如果是点，设置选中状态
+        if obj_type == 'point':
+            edit_manager._selected_point_id = obj_id
+            if hasattr(view, 'status_message'):
+                view.status_message.emit(f'已选中{type_name}: {obj_id}')
+        else:
+            # 如果不是点，清除点选中状态
+            if hasattr(edit_manager, '_selected_point_id'):
+                edit_manager._selected_point_id = None
+            if hasattr(view, 'status_message'):
+                view.status_message.emit(f'已选中{type_name}: {obj_id}')
         return
 
     @staticmethod

@@ -37,19 +37,7 @@ class InteractiveView(QtInteractor):
     def __init__(self, parent=None, 
                  workspace_bounds: Optional[np.ndarray] = None,
                  background_color: str = 'white'):
-        """
-        初始化交互式视图
-        
-        Parameters:
-        -----------
-        parent : QWidget, optional
-            父窗口
-        workspace_bounds : np.ndarray, optional
-            建模空间边界 [xmin, xmax, ymin, ymax, zmin, zmax]
-            如果为None，使用默认值 [-100, 100, -100, 100, -50, 0]
-        background_color : str
-            背景颜色，默认白色
-        """
+        """初始化交互式视图"""
         super().__init__(parent)
         
         # 设置背景颜色

@@ -13,8 +13,7 @@ def round_to_2_decimals(value):
     if isinstance(value, (list, np.ndarray)):
         return np.round(value, 2)
     return round(float(value), 2)
-
-
+    
 class Mesh:
     """网格类 - 管理网格数据和属性"""
     

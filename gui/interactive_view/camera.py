@@ -364,8 +364,7 @@ class CameraController:
         # 计算目标距离
         target_distance = max(diag * distance_factor, 5.0)
         
-        # 使用面提供的法向量（应该是单位向量）
-        # 确保法向量是单位向量
+        # 使用面提供的法向量
         normal_length = np.linalg.norm(plane_normal)
         if normal_length < 1e-10:
             # 法向量无效，使用默认方向

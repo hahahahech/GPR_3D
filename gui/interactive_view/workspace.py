@@ -7,18 +7,7 @@ from typing import Optional
 
 
 def create_workspace_bounds_mesh(bounds: np.ndarray):
-    """
-    创建建模空间边界框的网格对象
-    Parameters:
-    -----------
-    bounds : np.ndarray
-        边界 [xmin, xmax, ymin, ymax, zmin, zmax]
-        
-    Returns:
-    --------
-    pyvista.PolyData
-        边界框线框网格
-    """
+    """创建建模空间边界框的网格对象"""
     x_min, x_max = bounds[0], bounds[1]
     y_min, y_max = bounds[2], bounds[3]
     z_min, z_max = bounds[4], bounds[5]
@@ -57,19 +46,7 @@ def create_workspace_bounds_mesh(bounds: np.ndarray):
 
 
 def calculate_workspace_center(bounds: np.ndarray) -> np.ndarray:
-    """
-    计算建模空间中心点
-    
-    Parameters:
-    -----------
-    bounds : np.ndarray
-        边界 [xmin, xmax, ymin, ymax, zmin, zmax]
-        
-    Returns:
-    --------
-    np.ndarray
-        中心点坐标 [x, y, z]
-    """
+    """计算建模空间中心点"""
     return np.array([
         (bounds[0] + bounds[1]) / 2.0,
         (bounds[2] + bounds[3]) / 2.0,
@@ -78,19 +55,7 @@ def calculate_workspace_center(bounds: np.ndarray) -> np.ndarray:
 
 
 def calculate_initial_camera_distance(bounds: np.ndarray) -> float:
-    """
-    计算初始摄像机距离
-    
-    Parameters:
-    -----------
-    bounds : np.ndarray
-        边界 [xmin, xmax, ymin, ymax, zmin, zmax]
-        
-    Returns:
-    --------
-    float
-        建议的摄像机距离
-    """
+    """计算初始摄像机距离"""
     # 计算空间对角线长度
     dx = bounds[1] - bounds[0]
     dy = bounds[3] - bounds[2]
@@ -101,35 +66,12 @@ def calculate_initial_camera_distance(bounds: np.ndarray) -> float:
 
 
 def get_default_workspace_bounds() -> np.ndarray:
-    """
-    获取默认的建模空间边界
-    
-    Returns:
-    --------
-    np.ndarray
-        默认边界 [xmin, xmax, ymin, ymax, zmin, zmax]
-    """
+    """获取默认的建模空间边界"""
     return np.array([-100.0, 100.0, -100.0, 100.0, -50.0, 0.0])
 
 
 def create_grid_mesh(bounds: np.ndarray, grid_spacing: float = 10.0, z: float = 0.0) -> pv.PolyData:
-    """
-    创建Z=0平面的网格
-    
-    Parameters:
-    -----------
-    bounds : np.ndarray
-        边界 [xmin, xmax, ymin, ymax, zmin, zmax]
-    grid_spacing : float
-        网格间距，默认10.0
-    z : float
-        Z坐标值，默认0.0（Z=0平面）
-        
-    Returns:
-    --------
-    pyvista.PolyData
-        网格线框对象
-    """
+    """创建Z=0平面的网格"""
     x_min, x_max = bounds[0], bounds[1]
     y_min, y_max = bounds[2], bounds[3]
     
@@ -170,21 +112,7 @@ def create_grid_mesh(bounds: np.ndarray, grid_spacing: float = 10.0, z: float = 
 
 
 def create_origin_axes_mesh(bounds: np.ndarray, axis_length: Optional[float] = None) -> pv.PolyData:
-    """
-    创建原点坐标轴（XY轴）
-    
-    Parameters:
-    -----------
-    bounds : np.ndarray
-        边界 [xmin, xmax, ymin, ymax, zmin, zmax]
-    axis_length : float, optional
-        坐标轴长度，如果为None，则根据工作空间大小自动计算
-        
-    Returns:
-    --------
-    pyvista.PolyData
-        坐标轴线框对象
-    """
+    """创建原点坐标轴（XY轴）"""
     x_min, x_max = bounds[0], bounds[1]
     y_min, y_max = bounds[2], bounds[3]
     z_min, z_max = bounds[4], bounds[5]

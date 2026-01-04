@@ -7,7 +7,7 @@ from typing import Optional, Dict, List, Tuple, Any, Union
 from PyQt5.QtCore import QPoint
 from gui.interactive_view.camera import CameraController
 from gui.interactive_view.coordinates import CoordinateConverter
-from model.geometry import Surface
+from model.geometry import Plane
 
 class SelectionManager:
     """选择管理器 - 负责对象选择检测和处理逻辑"""
@@ -137,54 +137,162 @@ class SelectionManager:
         return candidates
     
     def _select_lines_at_screen(self, renderer, camera_pos, vtk_x, vtk_y, pixel_threshold):
-        """检测屏幕位置的线候选对象"""
+        """检测屏幕位置的折线候选对象"""
         candidates = []
-        for line_id, (start, end) in self._edit_manager.lines.items():
+        
+        # 检测折线（检查每一段）
+        for polyline_id, polyline_data in getattr(self._edit_manager, '_polylines', {}).items():
             try:
-                if isinstance(start, str):
-                    start_pos = self._edit_manager.points[start].position
-                else:
-                    start_pos = np.array(start, dtype=np.float64)
-                if isinstance(end, str):
-                    end_pos = self._edit_manager.points[end].position
-                else:
-                    end_pos = np.array(end, dtype=np.float64)
+                polyline_obj = polyline_data['geometry']
+                point_ids = polyline_data['point_ids']
+                
+                if len(point_ids) < 2:
+                    continue
+                    
+                # 获取所有点的位置
+                positions = []
+                for pid in point_ids:
+                    if pid in self._edit_manager.points:
+                        positions.append(self._edit_manager.points[pid].position)
+                    else:
+                        positions.append(None)
+                
+                # 检查每一段线段
+                min_screen_dist = float('inf')
+                closest_segment_info = None
+                
+                for i in range(len(positions) - 1):
+                    start_pos = positions[i]
+                    end_pos = positions[i + 1]
+                    
+                    if start_pos is None or end_pos is None:
+                        continue
+                    
+                    # 投影到屏幕
+                    renderer.SetWorldPoint(start_pos[0], start_pos[1], start_pos[2], 1.0)
+                    renderer.WorldToDisplay()
+                    start_screen = np.array(renderer.GetDisplayPoint()[:2])
+                    
+                    renderer.SetWorldPoint(end_pos[0], end_pos[1], end_pos[2], 1.0)
+                    renderer.WorldToDisplay()
+                    end_screen = np.array(renderer.GetDisplayPoint()[:2])
+                    
+                    # 计算点到线段的距离
+                    click_screen = np.array([vtk_x, vtk_y])
+                    line_vec = end_screen - start_screen
+                    line_len = np.linalg.norm(line_vec)
+                    
+                    if line_len < 1e-6:
+                        screen_dist = np.linalg.norm(click_screen - start_screen)
+                    else:
+                        t = np.dot(click_screen - start_screen, line_vec) / (line_len ** 2)
+                        t = np.clip(t, 0.0, 1.0)
+                        closest_point = start_screen + t * line_vec
+                        screen_dist = np.linalg.norm(click_screen - closest_point)
+                    
+                    if screen_dist < min_screen_dist:
+                        min_screen_dist = screen_dist
+                        closest_segment_info = (start_pos, end_pos)
+                
+                # 如果有足够近的线段，添加候选
+                if min_screen_dist <= pixel_threshold and closest_segment_info:
+                    start_pos, end_pos = closest_segment_info
+                    mid_pos = (start_pos + end_pos) / 2.0
+                    depth = np.linalg.norm(mid_pos - camera_pos)
+                    candidates.append({
+                        'type': 'line',
+                        'id': polyline_id,
+                        'screen_dist': min_screen_dist,
+                        'depth': depth,
+                        'data': (start_pos.copy(), end_pos.copy()),
+                        'focus_point': mid_pos
+                    })
+                    
             except Exception:
                 continue
-            
-            # 投影起点和终点到屏幕
-            renderer.SetWorldPoint(start_pos[0], start_pos[1], start_pos[2], 1.0)
-            renderer.WorldToDisplay()
-            start_screen = np.array(renderer.GetDisplayPoint()[:2])
-            
-            renderer.SetWorldPoint(end_pos[0], end_pos[1], end_pos[2], 1.0)
-            renderer.WorldToDisplay()
-            end_screen = np.array(renderer.GetDisplayPoint()[:2])
-            
-            # 计算点到线段的距离
-            click_screen = np.array([vtk_x, vtk_y])
-            line_vec = end_screen - start_screen
-            line_len = np.linalg.norm(line_vec)
-            
-            if line_len < 1e-6:
-                screen_dist = np.linalg.norm(click_screen - start_screen)
-            else:
-                t = np.dot(click_screen - start_screen, line_vec) / (line_len ** 2)
-                t = np.clip(t, 0.0, 1.0)
-                closest_point = start_screen + t * line_vec
-                screen_dist = np.linalg.norm(click_screen - closest_point)
-            
-            if screen_dist <= pixel_threshold:
-                mid_pos = (start_pos + end_pos) / 2.0
-                depth = np.linalg.norm(mid_pos - camera_pos)
-                candidates.append({
-                    'type': 'line',
-                    'id': line_id,
-                    'screen_dist': screen_dist,
-                    'depth': depth,
-                    'data': (start_pos.copy(), end_pos.copy()),
-                    'focus_point': mid_pos
-                })
+        
+        # 检测曲线
+        curve_candidates = self._select_curves_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
+        candidates.extend(curve_candidates)
+        
+        return candidates
+    
+    def _select_curves_at_screen(self, renderer, camera_pos, vtk_x, vtk_y, pixel_threshold):
+        """检测屏幕位置的曲线候选对象"""
+        candidates = []
+        
+        for curve_id, curve_data in getattr(self._edit_manager, '_curves', {}).items():
+            try:
+                # 使用几何对象
+                curve_obj = curve_data['geometry']
+                control_points = [cp.position for cp in curve_obj.control_points]
+                degree = curve_obj.degree
+                
+                # 生成曲线的采样点用于选择检测
+                from gui.interactive_view.edit_mode.line import LineOperator
+                line_operator = LineOperator(self._edit_manager)
+                
+                # 使用曲线生成方法获取采样点
+                curve_points = line_operator.generate_smooth_curve(
+                    control_points, 
+                    num_points=50,  # 50个采样点足够用于选择检测
+                    degree=degree
+                )
+                
+                if curve_points is None or len(curve_points) < 2:
+                    continue
+                
+                # 检查曲线的每一段（采样点之间的线段）
+                min_screen_dist = float('inf')
+                closest_segment_info = None
+                
+                for i in range(len(curve_points) - 1):
+                    start_pos = curve_points[i]
+                    end_pos = curve_points[i + 1]
+                    
+                    # 投影到屏幕
+                    renderer.SetWorldPoint(start_pos[0], start_pos[1], start_pos[2], 1.0)
+                    renderer.WorldToDisplay()
+                    start_screen = np.array(renderer.GetDisplayPoint()[:2])
+                    
+                    renderer.SetWorldPoint(end_pos[0], end_pos[1], end_pos[2], 1.0)
+                    renderer.WorldToDisplay()
+                    end_screen = np.array(renderer.GetDisplayPoint()[:2])
+                    
+                    # 计算点到线段的距离
+                    click_screen = np.array([vtk_x, vtk_y])
+                    line_vec = end_screen - start_screen
+                    line_len = np.linalg.norm(line_vec)
+                    
+                    if line_len < 1e-6:
+                        screen_dist = np.linalg.norm(click_screen - start_screen)
+                    else:
+                        t = np.dot(click_screen - start_screen, line_vec) / (line_len ** 2)
+                        t = np.clip(t, 0.0, 1.0)
+                        closest_point = start_screen + t * line_vec
+                        screen_dist = np.linalg.norm(click_screen - closest_point)
+                    
+                    if screen_dist < min_screen_dist:
+                        min_screen_dist = screen_dist
+                        closest_segment_info = (start_pos, end_pos)
+                
+                # 如果有足够近的线段，添加候选
+                if min_screen_dist <= pixel_threshold and closest_segment_info:
+                    start_pos, end_pos = closest_segment_info
+                    mid_pos = (start_pos + end_pos) / 2.0
+                    depth = np.linalg.norm(mid_pos - camera_pos)
+                    candidates.append({
+                        'type': 'line',
+                        'id': curve_id,
+                        'screen_dist': min_screen_dist,
+                        'depth': depth,
+                        'data': (start_pos.copy(), end_pos.copy()),
+                        'focus_point': mid_pos
+                    })
+                    
+            except Exception:
+                continue
+        
         return candidates
     
     def _select_planes_at_screen(self, renderer, camera_pos, vtk_x, vtk_y, pixel_threshold):
@@ -228,7 +336,7 @@ class SelectionManager:
         return candidates
     
     def select_at_screen_position(self, screen_pos: QPoint, view, pixel_threshold: int = 10) -> Optional[Dict[str, Any]]:
-        """在屏幕坐标位置选择对象（基于屏幕像素距离，考虑深度） """
+        """在屏幕坐标位置选择对象（按优先级检测，检测到就返回）"""
         renderer = view.renderer
         width = view.width()
         height = view.height()
@@ -241,53 +349,42 @@ class SelectionManager:
         vtk_x = screen_pos.x()
         vtk_y = height - screen_pos.y() - 1
         
-        # 按顺序检测：点 > 线 > 面
-        candidates = []
+        # 按优先级检测：点 > 线 > 面，检测到就立即返回
         
-        # 1. 检测点
+        # 1. 检测点（最高优先级）
         point_candidates = self._select_points_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
-        candidates.extend(point_candidates)
-        
-        # 2. 检测线
-        line_candidates = self._select_lines_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
-        candidates.extend(line_candidates)
-        
-        # 3. 检测面
-        plane_candidates = self._select_planes_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
-        candidates.extend(plane_candidates)
-        
-        # 如果没有候选对象，返回None
-        if not candidates:
-            self._edit_manager._selected_point_id = None
-            self._edit_manager._selected_line_id = None
-            self._edit_manager._selected_plane_id = None
-            self._edit_manager.set_active_plane(None)
-            return None
-        
-        # 排序：按类型优先级（点>线>面），面中生成的面优先于边界面，然后按深度，最后按屏幕距离
-        type_priority = {'point': 0, 'line': 1, 'plane': 2}
-        candidates.sort(key=lambda x: (
-            type_priority[x['type']], 
-            x.get('is_boundary', False),  # 生成的面(False)优先于边界面(True)
-            x['depth'], 
-            x['screen_dist']
-        ))
-
-        # 根据选中对象类型更新状态
-        selected = candidates[0]
-        sel_type = selected['type']
-        
-        if sel_type == 'point':
+        if point_candidates:
+            # 按深度和屏幕距离排序
+            point_candidates.sort(key=lambda x: (x['depth'], x['screen_dist']))
+            selected = point_candidates[0]
             self._edit_manager._selected_point_id = selected['id']
             self._edit_manager._selected_line_id = None
             self._edit_manager._selected_plane_id = None
             self._edit_manager.set_active_plane(None)
-        elif sel_type == 'line':
+            return selected
+        
+        # 2. 检测线（中等优先级）
+        line_candidates = self._select_lines_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
+        if line_candidates:
+            # 按深度和屏幕距离排序
+            line_candidates.sort(key=lambda x: (x['depth'], x['screen_dist']))
+            selected = line_candidates[0]
             self._edit_manager._selected_point_id = None
             self._edit_manager._selected_line_id = selected['id']
             self._edit_manager._selected_plane_id = None
             self._edit_manager.set_active_plane(None)
-        elif sel_type == 'plane':
+            return selected
+        
+        # 3. 检测面（最低优先级）
+        plane_candidates = self._select_planes_at_screen(renderer, camera_pos, vtk_x, vtk_y, pixel_threshold)
+        if plane_candidates:
+            # 面需要特殊排序：生成的面优先于边界面，然后按深度和屏幕距离
+            plane_candidates.sort(key=lambda x: (
+                x.get('is_boundary', False),  # 生成的面(False)优先于边界面(True)
+                x['depth'], 
+                x['screen_dist']
+            ))
+            selected = plane_candidates[0]
             self._edit_manager._selected_point_id = None
             self._edit_manager._selected_line_id = None
             self._edit_manager._selected_plane_id = selected['id']
@@ -297,24 +394,25 @@ class SelectionManager:
             plane_data = self._edit_manager.planes.get(self._edit_manager._selected_plane_id)
             if plane_data is not None:
                 if hasattr(plane_data, 'vertices') and hasattr(plane_data, 'normal'):
-                    # Surface 对象，直接使用
+                    # Plane 对象，直接使用
                     CameraController.focus_on_plane(view, plane_data)
                 else:
-                    # 旧的顶点数组格式，创建临时 Surface 对象
-                    temp_surface = Surface(
+                    # 旧的顶点数组格式，创建临时 Plane 对象
+                    temp_plane = Plane(
                         id=self._edit_manager._selected_plane_id,
                         vertices=plane_data,
-                        surface_type='polygon'
+                        plane_type='polygon'
                     )
-                    CameraController.focus_on_plane(view, temp_surface)
-
-
-        return {
-            'type': selected['type'],
-            'id': selected['id'],
-            'data': selected['data'],
-            'focus_point': selected['focus_point']
-        }
+                    CameraController.focus_on_plane(view, temp_plane)
+            
+            return selected
+        
+        # 没有检测到任何对象
+        self._edit_manager._selected_point_id = None
+        self._edit_manager._selected_line_id = None
+        self._edit_manager._selected_plane_id = None
+        self._edit_manager.set_active_plane(None)
+        return None
     
     def select_at_position(self, world_pos: np.ndarray) -> Optional[Dict[str, Any]]:
         """在指定世界坐标位置选择面对象"""
@@ -411,10 +509,7 @@ class SelectionManager:
             self.send_selection_message(view, selected)
             return
         
-        # 3. 启动拖拽
-        if hasattr(view, '_point_operator'):
-            view._point_operator.start_drag(point_id, screen_pos, view)
-    
+            
     def handle_line_selection(self, selected, view):
         """
         处理线选择逻辑

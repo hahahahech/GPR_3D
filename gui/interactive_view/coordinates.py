@@ -224,4 +224,267 @@ class CoordinateConverter:
         except Exception as e:
             print(f"平面坐标转世界坐标失败: {e}")
             return None
-
+    
+    @staticmethod
+    def constrain_to_line_entity(world_pos: np.ndarray, edit_manager, entity_id: str) -> Optional[np.ndarray]:
+        """
+        将世界坐标限制在线实体上（折线或曲线）
+        直接传入实体ID，自动识别实体类型并进行坐标限制
+        --------
+        Optional[np.ndarray]
+            限制在线实体上的点，如果实体不存在则返回None
+        """
+        try:
+            # 检查是否为折线
+            if hasattr(edit_manager, '_polylines') and entity_id in edit_manager._polylines:
+                return CoordinateConverter.constrain_to_polyline_entity(world_pos, edit_manager, entity_id)
+            
+            # 检查是否为曲线
+            elif hasattr(edit_manager, '_curves') and entity_id in edit_manager._curves:
+                return CoordinateConverter.constrain_to_curve_entity(world_pos, edit_manager, entity_id)
+            
+            # 实体不存在
+            return None
+            
+        except Exception as e:
+            print(f"限制坐标到线实体失败: {e}")
+            return None
+    
+    @staticmethod
+    def constrain_to_polyline_entity(world_pos: np.ndarray, edit_manager, polyline_id: str) -> Optional[np.ndarray]:
+        """
+        将世界坐标限制到折线实体上
+        
+        Parameters:
+        -----------
+        world_pos : np.ndarray
+            要限制的世界坐标点 (3,)
+        edit_manager : EditModeManager
+            编辑模式管理器
+        polyline_id : str
+            折线ID
+            
+        Returns:
+        --------
+        Optional[np.ndarray]
+            限制在折线上的点，如果折线不存在则返回None
+        """
+        try:
+            if not hasattr(edit_manager, '_polylines') or polyline_id not in edit_manager._polylines:
+                return None
+            
+            point_ids = edit_manager._polylines[polyline_id]
+            polyline_points = []
+            
+            for pid in point_ids:
+                if pid in edit_manager.points:
+                    polyline_points.append(edit_manager.points[pid].position)
+            
+            if len(polyline_points) >= 2:
+                return CoordinateConverter.constrain_to_polyline(world_pos, polyline_points)
+            
+            return None
+            
+        except Exception as e:
+            print(f"限制坐标到折线实体失败: {e}")
+            return None
+    
+    @staticmethod
+    def constrain_to_curve_entity(world_pos: np.ndarray, edit_manager, curve_id: str) -> Optional[np.ndarray]:
+        """
+        将世界坐标限制到曲线实体上
+        
+        Parameters:
+        -----------
+        world_pos : np.ndarray
+            要限制的世界坐标点 (3,)
+        edit_manager : EditModeManager
+            编辑模式管理器
+        curve_id : str
+            曲线ID
+            
+        Returns:
+        --------
+        Optional[np.ndarray]
+            限制在曲线上的点，如果曲线不存在则返回None
+        """
+        try:
+            if not hasattr(edit_manager, '_curves') or curve_id not in edit_manager._curves:
+                return None
+            
+            curve_data = edit_manager._curves[curve_id]
+            control_point_ids = curve_data.get('control_point_ids', [])
+            
+            if len(control_point_ids) < 2:
+                return None
+            
+            # 获取控制点坐标
+            control_points = []
+            for pid in control_point_ids:
+                if pid in edit_manager.points:
+                    control_points.append(edit_manager.points[pid].position)
+            
+            if len(control_points) < 2:
+                return None
+            
+            # 生成曲线的采样点用于距离计算
+            from gui.interactive_view.edit_mode.line import LineOperator
+            line_operator = LineOperator(edit_manager)
+            
+            # 使用曲线生成方法获取采样点
+            curve_points = line_operator.generate_smooth_curve(
+                control_points, 
+                num_points=100,  # 生成100个采样点
+                degree=curve_data.get('degree', 3)
+            )
+            
+            if curve_points is not None and len(curve_points) >= 2:
+                # 将曲线视为折线进行处理
+                return CoordinateConverter.constrain_to_polyline(world_pos, curve_points)
+            
+            return None
+            
+        except Exception as e:
+            print(f"限制坐标到曲线实体失败: {e}")
+            return None
+    
+    @staticmethod
+    def constrain_to_selected_line_if_near(view, screen_pos: QPoint, pixel_threshold: int = 20) -> Optional[np.ndarray]:
+        """
+        当选中线且光标靠近线时，将世界坐标限制到线上
+        
+        Parameters:
+        -----------
+        view : InteractiveView
+            视图对象
+        screen_pos : QPoint
+            屏幕坐标位置
+        pixel_threshold : int
+            像素阈值，默认20像素
+            
+        Returns:
+        --------
+        Optional[np.ndarray]
+            如果选中线且光标靠近线，返回限制在线上的坐标
+            否则返回普通的世界坐标或None
+        """
+        try:
+            # 获取编辑管理器
+            edit_manager = getattr(view, '_edit_mode_manager', None)
+            if edit_manager is None:
+                return None
+            
+            # 检查是否有选中的线
+            selected_line_id = getattr(edit_manager, 'selected_line_id', None)
+            if selected_line_id is None:
+                # 没有选中的线，返回普通世界坐标
+                return CoordinateConverter.screen_to_world(view, screen_pos)
+            
+            # 检查光标是否靠近选中的线
+            from gui.interactive_view.edit_mode.select import SelectionManager
+            selector = SelectionManager(edit_manager)
+            
+            # 检测光标位置的对象
+            selected = selector.select_at_screen_position(screen_pos, view, pixel_threshold=pixel_threshold)
+            
+            if selected is None or selected.get('type') != 'line' or selected.get('id') != selected_line_id:
+                # 光标没有靠近选中的线，返回普通世界坐标
+                return CoordinateConverter.screen_to_world(view, screen_pos)
+            
+            # 光标靠近选中的线，获取普通世界坐标
+            world_pos = CoordinateConverter.screen_to_world(view, screen_pos)
+            if world_pos is None:
+                return None
+            
+            # 将世界坐标限制到选中的线上
+            constrained_pos = CoordinateConverter.constrain_to_line_entity(world_pos, edit_manager, selected_line_id)
+            
+            return constrained_pos if constrained_pos is not None else world_pos
+            
+        except Exception as e:
+            print(f"限制到选中线失败: {e}")
+            # 出错时返回普通世界坐标
+            return CoordinateConverter.screen_to_world(view, screen_pos)
+    
+    @staticmethod
+    def get_world_position_with_line_constraint(view, screen_pos: QPoint, pixel_threshold: int = 20) -> Optional[np.ndarray]:
+        """
+        获取世界坐标，如果选中线且光标靠近线则自动限制到线上
+        
+        这是 constrain_to_selected_line_if_near 的别名方法，提供更直观的命名
+        
+        Parameters:
+        -----------
+        view : InteractiveView
+            视图对象
+        screen_pos : QPoint
+            屏幕坐标位置
+        pixel_threshold : int
+            像素阈值，默认20像素
+            
+        Returns:
+        --------
+        Optional[np.ndarray]
+            世界坐标（可能被限制到线上）
+        """
+        return CoordinateConverter.constrain_to_selected_line_if_near(view, screen_pos, pixel_threshold)
+    
+    @staticmethod
+    def _constrain_to_polyline_entity(world_pos: np.ndarray, edit_manager, polyline_id: str) -> Optional[np.ndarray]:
+        """将坐标限制到折线实体上"""
+        try:
+            point_ids = edit_manager._polylines[polyline_id]
+            polyline_points = []
+            
+            for pid in point_ids:
+                if pid in edit_manager.points:
+                    polyline_points.append(edit_manager.points[pid].position)
+            
+            if len(polyline_points) >= 2:
+                return CoordinateConverter.constrain_to_polyline(world_pos, polyline_points)
+            
+            return None
+            
+        except Exception as e:
+            print(f"限制坐标到折线实体失败: {e}")
+            return None
+    
+    @staticmethod
+    def _constrain_to_curve_entity(world_pos: np.ndarray, edit_manager, curve_id: str) -> Optional[np.ndarray]:
+        """将坐标限制到曲线实体上"""
+        try:
+            curve_data = edit_manager._curves[curve_id]
+            control_point_ids = curve_data.get('control_point_ids', [])
+            
+            if len(control_point_ids) < 2:
+                return None
+            
+            # 获取控制点坐标
+            control_points = []
+            for pid in control_point_ids:
+                if pid in edit_manager.points:
+                    control_points.append(edit_manager.points[pid].position)
+            
+            if len(control_points) < 2:
+                return None
+            
+            # 生成曲线的采样点用于距离计算
+            from gui.interactive_view.edit_mode.line import LineOperator
+            line_operator = LineOperator(edit_manager)
+            
+            # 使用曲线生成方法获取采样点
+            curve_points = line_operator.generate_smooth_curve(
+                control_points, 
+                num_points=100,  # 生成100个采样点
+                degree=curve_data.get('degree', 3)
+            )
+            
+            if curve_points is not None and len(curve_points) >= 2:
+                # 将曲线视为折线进行处理
+                return CoordinateConverter.constrain_to_polyline(world_pos, curve_points)
+            
+            return None
+            
+        except Exception as e:
+            print(f"限制坐标到曲线实体失败: {e}")
+            return None

@@ -360,12 +360,12 @@ class Curve(Line):
 
 
 @dataclass
-class Surface:
+class Plane:
     """面几何元素"""
     id: str
     vertices: np.ndarray  # 顶点坐标 (Nx3)，精度1位小数
     faces: Optional[np.ndarray] = None  # 面索引 (Mx3 for triangles, Mx4 for quads)
-    surface_type: str = 'polygon'  # 'polygon', 'mesh', 'nurbs', 'plane'
+    plane_type: str = 'polygon'  # 'polygon', 'mesh', 'nurbs', 'plane'
     name: Optional[str] = None
     color: Optional[tuple] = None  # (r,g,b) 0-1
     normal: Optional[np.ndarray] = None  # 法向量 (3,)，自动计算
@@ -459,7 +459,7 @@ class Surface:
     
     @classmethod
     def from_lines(cls, id: str, lines: List[Line], 
-                   name: Optional[str] = None) -> 'Surface':
+                   name: Optional[str] = None) -> 'Plane':
         """
         根据线生成面（类方法）
         
@@ -474,11 +474,11 @@ class Surface:
             
         Returns:
         --------
-        Surface
+        Plane
             面对象
         """
         if len(lines) < 3:
-            raise ValueError("At least 3 lines are required to form a surface")
+            raise ValueError("At least 3 lines are required to form a plane")
         
         # 收集所有顶点
         all_vertices = []
@@ -494,7 +494,7 @@ class Surface:
                     vertex_map[pos_tuple] = len(all_vertices) - 1
         
         if len(all_vertices) < 3:
-            raise ValueError("Not enough unique vertices to create a surface")
+            raise ValueError("Not enough unique vertices to create a plane")
         
         vertices = np.array(all_vertices)
         
@@ -510,11 +510,11 @@ class Surface:
                 id=id,
                 vertices=vertices,
                 faces=faces,
-                surface_type='polygon',
+                plane_type='polygon',
                 name=name
             )
         else:
-            raise ValueError("Not enough vertices to create a surface")
+            raise ValueError("Not enough vertices to create a plane")
     
     def get_bounds(self) -> np.ndarray:
         """获取边界框（1位小数）"""
@@ -552,7 +552,7 @@ class Surface:
         result = {
             'id': self.id,
             'vertices': self.vertices.tolist(),
-            'surface_type': self.surface_type,
+            'plane_type': self.plane_type,
             'name': self.name,
             'color': list(self.color) if self.color is not None else None,
             'normal': self.normal.tolist() if self.normal is not None else None
@@ -561,13 +561,13 @@ class Surface:
             result['faces'] = self.faces.tolist()
         return result
     
-    def copy(self) -> 'Surface':
+    def copy(self) -> 'Plane':
         """复制面"""
-        return Surface(
+        return Plane(
             id=self.id,
             vertices=self.vertices.copy(),
             faces=self.faces.copy() if self.faces is not None else None,
-            surface_type=self.surface_type,
+            plane_type=self.plane_type,
             name=self.name,
             color=self.color,
             normal=self.normal.copy() if self.normal is not None else None

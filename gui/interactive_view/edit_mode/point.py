@@ -30,12 +30,7 @@ class PointOperator:
         # 存储 Point 对象（与 EditModeManager 中的 _points 字典同步）
         self._point_objects: Dict[str, Point] = {}  # {id: Point}
         
-        # 操作状态
-        self._is_dragging = False
-        self._drag_start_pos = None
-        self._drag_point_id = None
-        self._drag_start_world_pos = None
-        
+                
         # 捕捉设置
         self._snap_to_grid = False
         self._grid_spacing = 10.0
@@ -81,64 +76,6 @@ class PointOperator:
     
     
     # ========== 编辑点 ==========
-    
-    def start_drag(self, point_id: str, screen_pos: QPoint, view):
-        """开始拖拽点"""
-        if point_id not in self.edit_manager._points:
-            return
-        
-        self._is_dragging = True
-        self._drag_point_id = point_id
-        self._drag_start_pos = screen_pos
-        
-        # 获取当前点的世界坐标
-        current_pos = self.edit_manager._points[point_id].position
-        self._drag_start_world_pos = current_pos.copy()
-    
-    def update_drag(self, screen_pos: QPoint, view):
-        """更新拖拽中的点位置"""
-        if not self._is_dragging or self._drag_point_id is None:
-            return
-        
-        # 获取世界坐标
-        world_pos = CoordinateConverter.screen_to_plane_relative(
-            screen_pos, view, 
-            clip_to_bounds=True
-        )
-        
-        if world_pos is None:
-            return
-        
-        # 限制点在工作空间边界内
-        bounds = view.workspace_bounds
-        clamped_pos = np.array([
-            np.clip(world_pos[0], bounds[0], bounds[1]),  # X
-            np.clip(world_pos[1], bounds[2], bounds[3]),  # Y
-            np.clip(world_pos[2], bounds[4], bounds[5])   # Z
-        ])
-        
-        # 计算偏移量
-        offset = clamped_pos - self._drag_start_world_pos
-        
-        # 应用约束
-        offset = self._apply_constraints(offset)
-        
-        # 计算新位置
-        new_pos = self._drag_start_world_pos + offset
-        
-        # 应用捕捉并限制在工作空间
-        new_pos = self._apply_snap(new_pos, view)
-        new_pos = self._clamp_to_workspace(new_pos, view)
-        
-        # 更新点位置
-        self.move_point(self._drag_point_id, new_pos, view)
-    
-    def end_drag(self):
-        """结束拖拽"""
-        self._is_dragging = False
-        self._drag_point_id = None
-        self._drag_start_pos = None
-        self._drag_start_world_pos = None
     
     def move_point(self, point_id: str, new_position: np.ndarray, view) -> bool:
         """移动点到指定位置"""
@@ -243,7 +180,8 @@ class PointOperator:
             except Exception:
                 e_pos = np.array(end, dtype=np.float64)
             # 计算点到线段的最短距离
-            dist = self.edit_manager.distance_point_to_line(position, s_pos, e_pos)
+            from gui.interactive_view.edit_mode.select import SelectionManager
+            dist = SelectionManager.distance_point_to_line(position, s_pos, e_pos)
             if dist < min_dist:
                 # 计算线段上最近的点
                 line_vec = e_pos - s_pos
@@ -265,7 +203,8 @@ class PointOperator:
         
         for vertices in self.edit_manager._planes.values():
             # 计算点到面的距离
-            dist = self.edit_manager.distance_point_to_plane(position, vertices)
+            from gui.interactive_view.edit_mode.select import SelectionManager
+            dist = SelectionManager.distance_point_to_plane(position, vertices)
             if dist < min_dist:
                 # 计算面上最近的点（简化：使用面的中心点）
                 nearest = np.mean(vertices, axis=0)

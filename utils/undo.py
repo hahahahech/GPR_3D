@@ -633,7 +633,29 @@ class CreatePolylineCommand(Command):
         # basic validation
         if not isinstance(self.point_ids, list) or len(self.point_ids) < 2:
             return False
-        self.edit_manager._polylines[self.polyline_id] = list(self.point_ids)
+        
+        # 获取Point对象列表
+        from model.geometry import Polyline, Point
+        point_objects = []
+        for pid in self.point_ids:
+            if pid in self.edit_manager._points:
+                point_obj = self.edit_manager._points[pid]
+                if not isinstance(point_obj, Point):
+                    point_obj = Point(id=pid, position=np.array(point_obj, dtype=np.float64))
+                    self.edit_manager._points[pid] = point_obj
+                point_objects.append(point_obj)
+            else:
+                return False
+        
+        # 创建Polyline几何对象
+        polyline_obj = Polyline(id=self.polyline_id, points=point_objects, color=self.color)
+        
+        # 存储几何对象
+        self.edit_manager._polylines[self.polyline_id] = {
+            'point_ids': list(self.point_ids),
+            'geometry': polyline_obj
+        }
+        
         if self.polyline_id not in self.edit_manager._line_colors:
             if self.color is not None:
                 self.edit_manager._line_colors[self.polyline_id] = tuple(self.color)
@@ -770,7 +792,33 @@ class CreateCurveCommand(Command):
             return False
         if len(self.control_point_ids) < 2:
             return False
-        self.edit_manager._curves[self.curve_id] = {'control_point_ids': list(self.control_point_ids), 'degree': int(self.degree), 'num_points': int(self.num_points)}
+        
+        # 获取Point对象列表
+        from model.geometry import Curve, Point
+        point_objects = []
+        for pid in self.control_point_ids:
+            if pid in self.edit_manager._points:
+                point_obj = self.edit_manager._points[pid]
+                if not isinstance(point_obj, Point):
+                    point_obj = Point(id=pid, position=np.array(point_obj, dtype=np.float64))
+                    self.edit_manager._points[pid] = point_obj
+                point_objects.append(point_obj)
+            else:
+                return False
+        
+        # 创建Curve几何对象
+        curve_obj = Curve(id=self.curve_id, control_points=point_objects, 
+                         degree=int(self.degree), num_points=int(self.num_points), 
+                         color=self.color)
+        
+        # 存储几何对象
+        self.edit_manager._curves[self.curve_id] = {
+            'control_point_ids': list(self.control_point_ids), 
+            'degree': int(self.degree), 
+            'num_points': int(self.num_points),
+            'geometry': curve_obj
+        }
+        
         if self.color is not None:
             self.edit_manager._line_colors[self.curve_id] = tuple(self.color)
         if self.locked:
@@ -873,22 +921,7 @@ class CreatePlaneCommand(Command):
     """创建面命令"""
 
     def __init__(self, edit_manager, plane_id: str, vertices: np.ndarray, color: Optional[tuple] = None, locked: bool = False):
-        """
-        初始化创建面命令
-
-        Parameters:
-        -----------
-        edit_manager : EditModeManager
-            编辑模式管理器
-        plane_id : str
-            面ID
-        vertices : np.ndarray
-            面顶点坐标 (Nx3 array)
-        color : tuple, optional
-            面颜色
-        locked : bool
-            是否锁定
-        """
+        """初始化创建面命令"""
         self.edit_manager = edit_manager
         self.plane_id = plane_id
         self.vertices = np.array(vertices, dtype=np.float64)
